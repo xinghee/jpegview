@@ -19,12 +19,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # 关键：只拉 WTL 这一个子模块。
-          # 若写成 true/recursive，会连带拉 libjxl / dav1d / LibRaw 等 13 个仓库，
-          # 其中 libjxl 体积极大，checkout 阶段就可能超时失败。
-          # 而这些库全部以预编译 .lib 的形式已在仓库里，根本不需要拉源码。
-          submodules: 'deps/WTL-sf'
+          # 注意：actions/checkout 的 submodules 只接受 true / recursive，
+          # 不接受具体路径（写成 'deps/WTL-sf' 会被忽略，结果一个子模块都不拉）。
+          # 因此这里不传 submodules，改由下一步手动只拉 WTL。
           fetch-depth: 1
+
+      - name: 拉取 WTL 子模块
+        shell: pwsh
+        run: |
+          # WTL 是 JPEGView 唯一的源码级依赖（头文件库），来自 sourceforge。
+          # 只拉这一个子模块，绝不 recursive —— 否则会连带拉 libjxl/dav1d/LibRaw 等 13 个巨型仓库。
+          git submodule update --init deps/WTL-sf
+          if (-not (Test-Path "deps/WTL-sf/Include/atlapp.h")) {
+            Get-ChildItem "deps/WTL-sf" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
+            throw "WTL 子模块拉取失败，deps/WTL-sf/Include/atlapp.h 不存在"
+          }
+          Write-Host "WTL OK: deps/WTL-sf/Include/atlapp.h"
 
       - name: 环境诊断
         shell: pwsh
@@ -73,13 +83,20 @@ jobs:
           if (-not $msbuild) { throw "找不到 MSBuild" }
           Write-Host "MSBuild: $msbuild"
 
-          # 工程原始设置是 PlatformToolset=v142（VS2019）。
-          # 镜像里若还有 v142 就用 v142（最贴近官方发布环境）；
-          # 没有就退回 v143（工程未开 /WX，警告不会中断编译，迁移风险低）。
+          # 工具集必须自带 ATL —— 这是 WTL 的硬依赖，也是上一次构建失败的直接原因：
+          # 本镜像 14.29(v142) 的 atlmfc 目录不存在，14.44(v143) 才有。
+          # 所以按「是否真的带 ATL」来选，不能只按版本号猜，否则会白失败一轮。
           $vsRoot = & $vswhere -latest -property installationPath
-          $hasV142 = Get-ChildItem "$vsRoot\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue |
-                     Where-Object { $_.Name -like '14.2*' }
-          $primary  = if ($hasV142) { 'v142' } else { 'v143' }
+          $cands = Get-ChildItem "$vsRoot\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+          $primary = $null
+          foreach ($c in $cands) {
+            $atl = Join-Path $c.FullName "atlmfc\include\atlbase.h"
+            Write-Host ("  工具集 {0}: ATL={1}" -f $c.Name, (Test-Path $atl))
+            if (-not $primary -and (Test-Path $atl)) {
+              $primary = if ($c.Name -match '^14\.2') { 'v142' } else { 'v143' }
+            }
+          }
+          if (-not $primary) { $primary = 'v143' }
           $fallback = if ($primary -eq 'v142') { 'v143' } else { 'v142' }
           Write-Host "主工具集: $primary / 备选: $fallback"
 
