@@ -955,15 +955,18 @@ LRESULT CMainDlg::OnMouseWheel(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, 
 // Touchpad two-finger gestures.
 //
 // RegisterTouchpadCapableWindow() makes these arrive as WM_POINTER messages
-// instead of being translated into wheel messages up front. When we return
-// bHandled = FALSE the dialog forwards the message to DefWindowProc, which
-// performs that same wheel translation - so any system that does not support
-// the API, or any gesture we decline, behaves exactly as before.
+// instead of being translated into wheel messages up front. Returning with
+// bHandled = FALSE forwards the message to DefWindowProc, which performs that
+// same wheel translation - so any system without the API, or any gesture we
+// decline, behaves exactly as before.
+//
+// Pan and zoom are not exclusive: one frame can carry both a midpoint shift and
+// a change in finger spread, and both are applied.
 // ---------------------------------------------------------------------------
 LRESULT CMainDlg::OnPointerDown(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 	int dx = 0, dy = 0;
 	double zr = 1.0;
-	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy, zr) != TouchpadHook::TP_NONE) {
+	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy, zr)) {
 		bHandled = TRUE;
 		return 0;
 	}
@@ -974,24 +977,22 @@ LRESULT CMainDlg::OnPointerDown(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, BOO
 LRESULT CMainDlg::OnPointerUpdate(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 	int dx = 0, dy = 0;
 	double zr = 1.0;
-	int r = TouchpadHook::OnPointer(uMsg, wParam, dx, dy, zr);
-	if (r == TouchpadHook::TP_NONE) {
+	if (!TouchpadHook::OnPointer(uMsg, wParam, dx, dy, zr)) {
 		bHandled = FALSE;
 		return 0;
 	}
-	if (r == TouchpadHook::TP_PAN) {
-		if (dx != 0 || dy != 0) {
-			PerformPan(dx, dy, false);
-		}
-	} else if (r == TouchpadHook::TP_ZOOM) {
-		if (zr > 0.0 && zr != 1.0) {
-			// Anchor the zoom at the cursor, like the browser userscript, but
-			// only when the cursor really is inside the client area - a stale
-			// anchor outside the window would make the image jump sideways.
-			CPoint mp = GetMousePos();
-			BOOL bAnchor = m_clientRect.PtInRect(mp) ? TRUE : FALSE;
-			PerformZoom(GetZoom() * zr, false, bAnchor ? true : false, false);
-		}
+	// Zoom first, then pan: PerformZoom recomputes the offset around the anchor,
+	// so the pan delta must be applied on top of the rescaled view.
+	if (zr > 0.0 && zr != 1.0) {
+		// Anchor at the cursor like the browser userscript, but only when the
+		// cursor is really inside the client area - a stale anchor outside the
+		// window makes the image jump sideways.
+		CPoint mp = GetMousePos();
+		BOOL bAnchor = m_clientRect.PtInRect(mp) ? TRUE : FALSE;
+		PerformZoom(GetZoom() * zr, false, bAnchor ? true : false, false);
+	}
+	if (dx != 0 || dy != 0) {
+		PerformPan(dx, dy, false);
 	}
 	bHandled = TRUE;
 	return 0;
@@ -1000,7 +1001,7 @@ LRESULT CMainDlg::OnPointerUpdate(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, B
 LRESULT CMainDlg::OnPointerUp(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 	int dx = 0, dy = 0;
 	double zr = 1.0;
-	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy, zr) != TouchpadHook::TP_NONE) {
+	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy, zr)) {
 		bHandled = TRUE;
 		return 0;
 	}
