@@ -38,6 +38,7 @@
 #include "ProcessingThreadPool.h"
 #include "PaintMemDCMgr.h"
 #include "PanelMgr.h"
+#include "TouchpadHook.h"
 #include "ZoomNavigatorCtl.h"
 #include "ImageProcPanelCtl.h"
 #include "WndButtonPanelCtl.h"
@@ -427,6 +428,9 @@ LRESULT CMainDlg::OnInitDialog(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam
 	this->Invalidate(FALSE);
 
 	this->DragAcceptFiles();
+
+	// Precision touchpad: take over two-finger gestures (see TouchpadHook.h)
+	TouchpadHook::Init(m_hWnd);
 
 	return TRUE;
 }
@@ -944,6 +948,48 @@ LRESULT CMainDlg::OnMouseWheel(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, 
 	} else if (m_dZoom > 0 && !m_pUnsharpMaskPanelCtl->IsVisible()) {
 		PerformZoom(CSettingsProvider::This().MouseWheelZoomSpeed() * double(nDelta) / WHEEL_DELTA, true, m_bMouseOn, true);
 	}
+	return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Touchpad two-finger gestures.
+//
+// RegisterTouchpadCapableWindow() makes these arrive as WM_POINTER messages
+// instead of being translated into wheel messages up front. When we return
+// bHandled = FALSE the dialog forwards the message to DefWindowProc, which
+// performs that same wheel translation - so any system that does not support
+// the API, or any gesture we decline, behaves exactly as before.
+// ---------------------------------------------------------------------------
+LRESULT CMainDlg::OnPointerDown(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+	int dx = 0, dy = 0;
+	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy)) {
+		bHandled = TRUE;
+		return 0;
+	}
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CMainDlg::OnPointerUpdate(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+	int dx = 0, dy = 0;
+	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy)) {
+		if (dx != 0 || dy != 0) {
+			PerformPan(dx, dy, false);
+		}
+		bHandled = TRUE;
+		return 0;
+	}
+	bHandled = FALSE;
+	return 0;
+}
+
+LRESULT CMainDlg::OnPointerUp(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
+	int dx = 0, dy = 0;
+	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy)) {
+		bHandled = TRUE;
+		return 0;
+	}
+	bHandled = FALSE;
 	return 0;
 }
 
