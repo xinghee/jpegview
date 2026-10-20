@@ -1,0 +1,139 @@
+name: Build x64 Release
+
+# 只保留手动触发 + push 到 master，避免 fork 后无关提交触发构建
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**.md'
+      - '**.txt'
+
+jobs:
+  build:
+    # 关键：windows-2019 已于 2025-12-31 退役，官方 workflow 的 runs-on 现在直接失败
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 关键：只拉 WTL 这一个子模块。
+          # 若写成 true/recursive，会连带拉 libjxl / dav1d / LibRaw 等 13 个仓库，
+          # 其中 libjxl 体积极大，checkout 阶段就可能超时失败。
+          # 而这些库全部以预编译 .lib 的形式已在仓库里，根本不需要拉源码。
+          submodules: 'deps/WTL-sf'
+          fetch-depth: 1
+
+      - name: 环境诊断
+        shell: pwsh
+        run: |
+          Write-Host "=== Visual Studio ==="
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          & $vswhere -latest -products * -property installationPath
+          & $vswhere -latest -products * -property catalog_productDisplayVersion
+
+          Write-Host "=== 可用的 MSVC 工具集 ==="
+          $vsRoot = & $vswhere -latest -property installationPath
+          Get-ChildItem "$vsRoot\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.Name)" }
+
+          Write-Host "=== Windows SDK ==="
+          Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.Name)" }
+
+          Write-Host "=== ATL 是否存在（WTL 的硬依赖）==="
+          Test-Path "$vsRoot\VC\Tools\MSVC\*\atlmfc\include\atlbase.h"
+
+          Write-Host "=== WTL 子模块 ==="
+          Test-Path "deps/WTL-sf/Include/atlapp.h"
+
+      - name: 修正 OutDirFullPath
+        shell: pwsh
+        run: |
+          # $(OutDirFullPath) 不是标准 MSBuild 属性，在部分环境下展开为空，
+          # 会导致 PostBuildEvent 的批处理因 %~4 为空而 exit /b 1，整个构建失败。
+          # 换成 $(ProjectDir)$(OutDir) 语义等价且一定有值。
+          $p = "src/JPEGView/JPEGView.vcxproj"
+          $c = Get-Content $p -Raw
+          if ($c -match '\$\(OutDirFullPath\)') {
+            $c = $c -replace '\$\(OutDirFullPath\)', '$(ProjectDir)$(OutDir)'
+            [System.IO.File]::WriteAllText((Resolve-Path $p), $c, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Host '已替换 $(OutDirFullPath) -> $(ProjectDir)$(OutDir)'
+          } else {
+            Write-Host '未发现 $(OutDirFullPath)，跳过'
+          }
+
+      - name: 编译（工具集自适应 + 失败自动换工具集重试）
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+          if (-not $msbuild) { throw "找不到 MSBuild" }
+          Write-Host "MSBuild: $msbuild"
+
+          # 工程原始设置是 PlatformToolset=v142（VS2019）。
+          # 镜像里若还有 v142 就用 v142（最贴近官方发布环境）；
+          # 没有就退回 v143（工程未开 /WX，警告不会中断编译，迁移风险低）。
+          $vsRoot = & $vswhere -latest -property installationPath
+          $hasV142 = Get-ChildItem "$vsRoot\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -like '14.2*' }
+          $primary  = if ($hasV142) { 'v142' } else { 'v143' }
+          $fallback = if ($primary -eq 'v142') { 'v143' } else { 'v142' }
+          Write-Host "主工具集: $primary / 备选: $fallback"
+
+          $target = "src\JPEGView.sln"
+          # 用 sln + /t:JPEGView：
+          #   1) 不走整个 sln，可以跳过 JPEGView.Setup（WiX 的 MSI 项目，镜像里没 WiX 会失败）
+          #   2) 仍保留 $(SolutionDir)，PostBuildEvent 依赖它定位 extras\scripts
+          #   3) JPEGView 项目在 sln 里声明了依赖 WICLoader，会被自动先编译
+          # 注意不能用 /t:Rebuild —— 那是 sln 级目标，会把 Setup 一起 rebuild 然后失败
+          $ok = $false
+          $attempt = 0
+          foreach ($ts in @($primary, $fallback)) {
+            $attempt++
+            if ($attempt -gt 1) {
+              Write-Host "清理上一次工具集残留的 obj/bin ..."
+              Remove-Item "src\JPEGView\obj" -Recurse -Force -ErrorAction SilentlyContinue
+              Remove-Item "src\JPEGView\bin" -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host "===== 尝试 PlatformToolset=$ts ====="
+            & $msbuild $target `
+              /t:JPEGView `
+              /p:Configuration=Release `
+              /p:Platform=x64 `
+              /p:PlatformToolset=$ts `
+              /m /nologo /v:minimal
+            if ($LASTEXITCODE -eq 0) { Write-Host "编译成功，工具集=$ts"; $ok = $true; break }
+            Write-Host "工具集 $ts 失败，exit=$LASTEXITCODE"
+          }
+          if (-not $ok) { throw "两种工具集均编译失败，请看上方日志" }
+
+      - name: 校验产物
+        shell: pwsh
+        run: |
+          $out = "src/JPEGView/bin/x64/Release"
+          if (-not (Test-Path $out)) { throw "输出目录不存在: $out" }
+          Get-ChildItem $out | Sort-Object Name |
+            Select-Object Name, @{N='KB';E={[math]::Round($_.Length/1KB,1)}} | Format-Table -AutoSize
+
+          $exe = Join-Path $out "JPEGView.exe"
+          if (-not (Test-Path $exe)) { throw "没有生成 JPEGView.exe" }
+          $vi = (Get-Item $exe).VersionInfo
+          Write-Host "版本: $($vi.FileVersion) / $($vi.ProductVersion)"
+          Write-Host "大小: $([math]::Round((Get-Item $exe).Length/1KB,1)) KB"
+
+          # 便携版必须带上解码 DLL，否则 AVIF/HEIF/JXL/RAW 打不开
+          foreach ($d in @('avif.dll','heif.dll','jxl_dec.dll','libraw.dll','lcms2.dll','WICLoader.dll')) {
+            $f = Join-Path $out $d
+            if (-not (Test-Path $f)) { Write-Host "警告: 缺少 $d（对应格式将不可用）" }
+          }
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: JPEGView-x64-Release
+          path: src/JPEGView/bin/x64/Release/
+          if-no-files-found: error
+          retention-days: 30
