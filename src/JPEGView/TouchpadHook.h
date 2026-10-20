@@ -51,6 +51,20 @@ enum EGesture {
 	TP_ZOOM     = 3
 };
 
+// Locked gesture type for the duration of one two-finger gesture.
+// Deciding per frame makes a drag alternate with a zoom on noise, which shows
+// up as the picture pulsing and jumping.
+#define GM_UNDECIDED 0
+#define GM_PAN       1
+#define GM_ZOOM      2
+
+// Accumulated motion (himetric = 0.01 mm) needed before the gesture type is
+// committed. 30 = 0.3 mm, reached within a few frames of a real gesture.
+#define TP_DECIDE_THRESHOLD 30
+
+// Ignore finger-separation noise below this (himetric) once zooming.
+#define TP_ZOOM_DEADBAND 3
+
 // ---- constants that old SDK headers do not define ----
 // POINTER_INPUT_TYPE per winuser.h: PT_POINTER=1, PT_TOUCH=2, PT_PEN=3,
 // PT_MOUSE=4, PT_TOUCHPAD=5. Getting this wrong makes every gesture look
@@ -115,6 +129,9 @@ struct Ctx {
 	POINT   pts[2];
 	POINT   lastMid;
 	int     lastDist;
+	int     gestureMode;   // GM_UNDECIDED / GM_PAN / GM_ZOOM, locked per gesture
+	int     sumMove;
+	int     sumPinch;
 	int     msgCount;
 	int     panCount;
 	int     zoomCount;
@@ -244,6 +261,9 @@ inline void ResetTracking() {
 	c.lastMid.y = 0;
 	c.accX = 0.0;
 	c.accY = 0.0;
+	c.gestureMode = GM_UNDECIDED;
+	c.sumMove = 0;
+	c.sumPinch = 0;
 }
 
 inline void AddPoint(UINT32 id, POINT pt) {
@@ -377,22 +397,36 @@ inline int OnPointer(UINT msg, WPARAM wParam, int& outDx, int& outDy, double& ou
 		int move = (rawX < 0 ? -rawX : rawX) + (rawY < 0 ? -rawY : rawY);
 		int pinch = (dDist < 0 ? -dDist : dDist);
 
-		// Per-frame decision, matching how the original userscript splits the
-		// two: if the finger separation changes more than the midpoint travels,
-		// it is a pinch (zoom around the cursor); otherwise it is a drag (pan).
-		if (c.activeCount >= 2 && pinch > 0 && prevDist > 0 && pinch * 2 > move) {
-			double ratio = (double)dist / (double)prevDist;
-			if (ratio < 0.85) ratio = 0.85;
-			if (ratio > 1.15) ratio = 1.15;
-			if (ratio != 1.0) {
-				outZoom = ratio;
-				c.zoomCount++;
-				if (c.zoomCount <= 60) {
-					LogF("  zoom dist %d->%d ratio=%.4f", prevDist, dist, ratio);
-				}
-				return TP_ZOOM;
-			}
+		// Gather evidence first, then commit to a single gesture type for the
+		// rest of the gesture. A per-frame decision flickers between pan and
+		// zoom on finger-separation noise, which looks like the picture
+		// pulsing and jumping while the user is only dragging.
+		c.sumMove += move;
+		c.sumPinch += pinch;
+
+		if (c.gestureMode == GM_UNDECIDED) {
+			if (c.sumMove + c.sumPinch < TP_DECIDE_THRESHOLD) return TP_CONSUMED;
+			c.gestureMode = (c.sumPinch * 2 > c.sumMove) ? GM_ZOOM : GM_PAN;
+			LogF("gesture=%s (sumMove=%d sumPinch=%d)",
+				(c.gestureMode == GM_ZOOM) ? "zoom" : "pan", c.sumMove, c.sumPinch);
+			c.accX = 0.0;
+			c.accY = 0.0;
 			return TP_CONSUMED;
+		}
+
+		if (c.gestureMode == GM_ZOOM) {
+			if (c.activeCount < 2 || prevDist <= 0) return TP_CONSUMED;
+			if (pinch < TP_ZOOM_DEADBAND) return TP_CONSUMED;
+			double ratio = (double)dist / (double)prevDist;
+			if (ratio < 0.92) ratio = 0.92;
+			if (ratio > 1.08) ratio = 1.08;
+			if (ratio == 1.0) return TP_CONSUMED;
+			outZoom = ratio;
+			c.zoomCount++;
+			if (c.zoomCount <= 60) {
+				LogF("  zoom dist %d->%d ratio=%.4f", prevDist, dist, ratio);
+			}
+			return TP_ZOOM;
 		}
 
 		// himetric -> pixels, keeping the sub-pixel remainder so that a slow
@@ -436,6 +470,9 @@ inline void Init(HWND hwnd) {
 	c.ids[1] = 0;
 	c.hasMid = false;
 	c.lastDist = 0;
+	c.gestureMode = GM_UNDECIDED;
+	c.sumMove = 0;
+	c.sumPinch = 0;
 	c.msgCount = 0;
 	c.panCount = 0;
 	c.zoomCount = 0;
