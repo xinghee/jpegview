@@ -54,11 +54,13 @@ namespace TouchpadHook {
 #define TP_DECIDE_THRESHOLD 30
 
 // How much the spread change must dominate the midpoint travel before the
-// gesture counts as a pinch. Dragging always moves the fingers apart or
-// together a little: replaying recorded sessions showed that at bias 1.0 a
-// plain drag produced as many zoom frames as pan frames, while 1.5 left zero
-// accidental zooms and still classifies a real pinch (midpoint almost still).
-#define TP_PAN_BIAS 1.5
+// gesture counts as a pinch.
+// Replaying three recorded sessions settled this: during a pure drag the
+// accumulated spread change is 0..11 while the midpoint travels hundreds, so
+// the two are ~30x apart. During a real pinch the spread change is actually
+// SMALLER relative to travel than expected (145 vs 104, 934 vs 663), so any
+// bias above ~1.4 rejects genuine pinches. 1.0 separates both cases cleanly.
+#define TP_PAN_BIAS 1.0
 
 #define GM_UNDECIDED 0
 #define GM_PAN       1
