@@ -41,8 +41,11 @@
 namespace TouchpadHook {
 
 // ---- constants that old SDK headers do not define ----
+// POINTER_INPUT_TYPE per winuser.h: PT_POINTER=1, PT_TOUCH=2, PT_PEN=3,
+// PT_MOUSE=4, PT_TOUCHPAD=5. Getting this wrong makes every gesture look
+// foreign and get forwarded back as a wheel message.
 #ifndef PT_TOUCHPAD
-#define PT_TOUCHPAD 8
+#define PT_TOUCHPAD 5
 #endif
 #ifndef WM_POINTERUPDATE
 #define WM_POINTERUPDATE 0x0245
@@ -253,14 +256,16 @@ inline bool OnPointer(UINT msg, WPARAM wParam, int& outDx, int& outDy) {
 	PI_LOCAL pi;
 	ZeroMemory(&pi, sizeof(pi));
 	if (!gpi(id, &pi)) return c.inGesture;
-	if (pi.pointerType != PT_TOUCHPAD) return false;
 
 	POINT pt = pi.ptPixelLocation;
 	c.msgCount++;
+	// Log BEFORE the type check - otherwise a wrong pointer type silently
+	// disables the whole hook with no trace in the log at all.
 	if (c.msgCount <= 400) {
-		LogF("ptr msg=0x%04X id=%u pos=(%d,%d) flags=0x%08X",
-			(unsigned)msg, (unsigned)id, (int)pt.x, (int)pt.y, (unsigned)pi.pointerFlags);
+		LogF("ptr msg=0x%04X id=%u type=%d pos=(%d,%d) flags=0x%08X",
+			(unsigned)msg, (unsigned)id, (int)pi.pointerType, (int)pt.x, (int)pt.y, (unsigned)pi.pointerFlags);
 	}
+	if (pi.pointerType != PT_TOUCHPAD) return false;
 
 	if (msg == WM_POINTERDOWN) {
 		AddPoint(id, pt);
