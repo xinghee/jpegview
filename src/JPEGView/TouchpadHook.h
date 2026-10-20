@@ -46,9 +46,23 @@ namespace TouchpadHook {
 // removes every chance of a misclassification turning a drag into a zoom.
 // OnPointer returns true when the message belongs to us.
 
-// Ignore finger-separation noise below this (himetric = 0.01 mm). A real pinch
-// changes the spread by 20+ units per frame; dragging noise stays under ~5.
+// Ignore finger-separation noise below this (himetric = 0.01 mm).
 #define TP_ZOOM_DEADBAND 6
+
+// A gesture is classified once, after this much accumulated motion
+// (himetric = 0.01 mm), and keeps that class until the last finger lifts.
+#define TP_DECIDE_THRESHOLD 30
+
+// How much the spread change must dominate the midpoint travel before the
+// gesture counts as a pinch. Dragging always moves the fingers apart or
+// together a little: replaying recorded sessions showed that at bias 1.0 a
+// plain drag produced as many zoom frames as pan frames, while 1.5 left zero
+// accidental zooms and still classifies a real pinch (midpoint almost still).
+#define TP_PAN_BIAS 1.5
+
+#define GM_UNDECIDED 0
+#define GM_PAN       1
+#define GM_ZOOM      2
 
 // ---- constants that old SDK headers do not define ----
 // POINTER_INPUT_TYPE per winuser.h: PT_POINTER=1, PT_TOUCH=2, PT_PEN=3,
@@ -114,6 +128,9 @@ struct Ctx {
 	POINT   pts[2];
 	POINT   lastMid;
 	int     lastDist;
+	int     gestureMode;   // GM_UNDECIDED / GM_PAN / GM_ZOOM, locked per gesture
+	int     sumMove;
+	int     sumPinch;
 	int     msgCount;
 	int     panCount;
 	int     zoomCount;
@@ -243,6 +260,9 @@ inline void ResetTracking() {
 	c.lastMid.y = 0;
 	c.accX = 0.0;
 	c.accY = 0.0;
+	c.gestureMode = GM_UNDECIDED;
+	c.sumMove = 0;
+	c.sumPinch = 0;
 }
 
 inline void AddPoint(UINT32 id, POINT pt) {
@@ -390,29 +410,45 @@ inline bool OnPointer(UINT msg, WPARAM wParam, int& outDx, int& outDy, double& o
 		int dDist = dist - prevDist;
 		c.lastMid = mid;
 		c.lastDist = dist;
+		if (rawX == 0 && rawY == 0 && dDist == 0) return true;
 
-		// --- channel 1: finger spread -> zoom ---
-		// Only a real change in spread counts. Drag noise stays far below the
-		// deadband, which is what stops a plain drag from pulsing the zoom.
-		if (c.activeCount >= 2 && prevDist > 0) {
-			int pinch = (dDist < 0) ? -dDist : dDist;
-			if (pinch >= TP_ZOOM_DEADBAND) {
-				double ratio = (double)dist / (double)prevDist;
-				if (ratio < 0.92) ratio = 0.92;
-				if (ratio > 1.08) ratio = 1.08;
-				if (ratio != 1.0) {
-					outZoom = ratio;
-					c.zoomCount++;
-					if (c.zoomCount <= 60) {
-						LogF("  zoom dist %d->%d ratio=%.4f", prevDist, dist, ratio);
-					}
-				}
-			}
+		int move = (rawX < 0 ? -rawX : rawX) + (rawY < 0 ? -rawY : rawY);
+		int pinch = (dDist < 0) ? -dDist : dDist;
+		c.sumMove += move;
+		c.sumPinch += pinch;
+
+		// Classify once per gesture, then keep the decision until the last
+		// finger lifts. Deciding per frame made a drag flicker between pan and
+		// zoom, which reads as the picture pulsing and jumping.
+		if (c.gestureMode == GM_UNDECIDED) {
+			if (c.sumMove + c.sumPinch < TP_DECIDE_THRESHOLD) return true;
+			c.gestureMode = ((double)c.sumPinch > (double)c.sumMove * TP_PAN_BIAS && c.activeCount >= 2)
+				? GM_ZOOM : GM_PAN;
+			LogF("gesture=%s (sumMove=%d sumPinch=%d)",
+				(c.gestureMode == GM_ZOOM) ? "zoom" : "pan", c.sumMove, c.sumPinch);
+			c.accX = 0.0;
+			c.accY = 0.0;
+			return true;
 		}
 
-		// --- channel 2: midpoint travel -> pan ---
-		// himetric -> pixels, keeping the sub-pixel remainder so that a slow
-		// drag still accumulates motion instead of rounding to zero forever.
+		if (c.gestureMode == GM_ZOOM) {
+			if (c.activeCount < 2 || prevDist <= 0) return true;
+			if (pinch < TP_ZOOM_DEADBAND) return true;
+			double ratio = (double)dist / (double)prevDist;
+			if (ratio < 0.92) ratio = 0.92;
+			if (ratio > 1.08) ratio = 1.08;
+			if (ratio != 1.0) {
+				outZoom = ratio;
+				c.zoomCount++;
+				if (c.zoomCount <= 60) {
+					LogF("  zoom dist %d->%d ratio=%.4f", prevDist, dist, ratio);
+				}
+			}
+			return true;
+		}
+
+		// GM_PAN: himetric -> pixels, keeping the sub-pixel remainder so that a
+		// slow drag still accumulates motion instead of rounding to zero forever.
 		if (rawX != 0 || rawY != 0) {
 			double sc = ComputeScale(pi.sourceDevice);
 			c.accX += (double)rawX * sc;
@@ -455,6 +491,9 @@ inline void Init(HWND hwnd) {
 	c.ids[1] = 0;
 	c.hasMid = false;
 	c.lastDist = 0;
+	c.gestureMode = GM_UNDECIDED;
+	c.sumMove = 0;
+	c.sumPinch = 0;
 	c.msgCount = 0;
 	c.panCount = 0;
 	c.zoomCount = 0;
