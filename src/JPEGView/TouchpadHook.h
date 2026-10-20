@@ -40,30 +40,15 @@
 
 namespace TouchpadHook {
 
-// Return codes for OnPointer().
-// TP_NONE means the message is not ours and must reach DefWindowProc, which
-// turns it back into a wheel message exactly as before.
-// Declared as an enum (not #define) so callers can write TouchpadHook::TP_NONE.
-enum EGesture {
-	TP_NONE     = 0,
-	TP_CONSUMED = 1,   // ours, but nothing to do this frame (down / up / no motion)
-	TP_PAN      = 2,
-	TP_ZOOM     = 3
-};
+// Pan and zoom are applied independently rather than being classified into one
+// or the other. Finger separation and midpoint travel are physically separate
+// quantities, so mirroring both is exactly what the hand is doing. That also
+// removes every chance of a misclassification turning a drag into a zoom.
+// OnPointer returns true when the message belongs to us.
 
-// Locked gesture type for the duration of one two-finger gesture.
-// Deciding per frame makes a drag alternate with a zoom on noise, which shows
-// up as the picture pulsing and jumping.
-#define GM_UNDECIDED 0
-#define GM_PAN       1
-#define GM_ZOOM      2
-
-// Accumulated motion (himetric = 0.01 mm) needed before the gesture type is
-// committed. 30 = 0.3 mm, reached within a few frames of a real gesture.
-#define TP_DECIDE_THRESHOLD 30
-
-// Ignore finger-separation noise below this (himetric) once zooming.
-#define TP_ZOOM_DEADBAND 3
+// Ignore finger-separation noise below this (himetric = 0.01 mm). A real pinch
+// changes the spread by 20+ units per frame; dragging noise stays under ~5.
+#define TP_ZOOM_DEADBAND 6
 
 // ---- constants that old SDK headers do not define ----
 // POINTER_INPUT_TYPE per winuser.h: PT_POINTER=1, PT_TOUCH=2, PT_PEN=3,
@@ -129,9 +114,6 @@ struct Ctx {
 	POINT   pts[2];
 	POINT   lastMid;
 	int     lastDist;
-	int     gestureMode;   // GM_UNDECIDED / GM_PAN / GM_ZOOM, locked per gesture
-	int     sumMove;
-	int     sumPinch;
 	int     msgCount;
 	int     panCount;
 	int     zoomCount;
@@ -261,9 +243,6 @@ inline void ResetTracking() {
 	c.lastMid.y = 0;
 	c.accX = 0.0;
 	c.accY = 0.0;
-	c.gestureMode = GM_UNDECIDED;
-	c.sumMove = 0;
-	c.sumPinch = 0;
 }
 
 inline void AddPoint(UINT32 id, POINT pt) {
@@ -283,6 +262,14 @@ inline void AddPoint(UINT32 id, POINT pt) {
 			return;
 		}
 	}
+	// No free slot: an earlier UP was lost. Drop the oldest contact rather than
+	// ignoring the new one, which would leave the state machine wedged and make
+	// every following gesture behave unpredictably.
+	c.ids[0] = c.ids[1];
+	c.pts[0] = c.pts[1];
+	c.ids[1] = id;
+	c.pts[1] = pt;
+	ResetTracking();
 }
 
 inline void UpdatePoint(UINT32 id, POINT pt) {
@@ -331,24 +318,25 @@ inline bool GetMid(POINT& mid, int& dist) {
 	return true;
 }
 
-// Returns TP_NONE when the message is not ours - it must then reach
-// DefWindowProc so the system restores its default wheel translation.
-// Otherwise returns the gesture kind for this frame: outDx/outDy carry the
-// pan delta in pixels, outZoom carries a multiplicative zoom factor.
-inline int OnPointer(UINT msg, WPARAM wParam, int& outDx, int& outDy, double& outZoom) {
+// Returns true when the message belongs to us and must not reach DefWindowProc.
+// Pan (midpoint travel) and zoom (finger spread) are independent physical
+// quantities, so both are mirrored in the same frame instead of classifying the
+// gesture into one or the other - that classification is what kept turning a
+// drag into an accidental zoom.
+inline bool OnPointer(UINT msg, WPARAM wParam, int& outDx, int& outDy, double& outZoom) {
 	Ctx& c = C();
 	outDx = 0;
 	outDy = 0;
 	outZoom = 1.0;
-	if (!c.enabled) return TP_NONE;
+	if (!c.enabled) return false;
 
 	PFN_GetPointerInfo gpi = ResolveGetPointerInfo();
-	if (gpi == NULL) return TP_NONE;
+	if (gpi == NULL) return false;
 
 	UINT32 id = (UINT32)(wParam & 0xFFFF);   // equivalent of GET_POINTERID_WPARAM
 	PI_LOCAL pi;
 	ZeroMemory(&pi, sizeof(pi));
-	if (!gpi(id, &pi)) return c.inGesture ? TP_CONSUMED : TP_NONE;
+	if (!gpi(id, &pi)) return c.inGesture;
 
 	// ptPixelLocation holds the mouse cursor position when the gesture started
 	// and never changes during it - reading it yields a constant. The contact
@@ -359,31 +347,41 @@ inline int OnPointer(UINT msg, WPARAM wParam, int& outDx, int& outDy, double& ou
 		LogF("ptr msg=0x%04X id=%u type=%d him=(%d,%d) flags=0x%08X",
 			(unsigned)msg, (unsigned)id, (int)pi.pointerType, (int)pt.x, (int)pt.y, (unsigned)pi.pointerFlags);
 	}
-	if (pi.pointerType != PT_TOUCHPAD) return TP_NONE;
+	if (pi.pointerType != PT_TOUCHPAD) return false;
 
 	if (msg == WM_POINTERDOWN) {
+		// A lost UP leaves stale contacts behind; without clearing them the next
+		// gesture inherits the leftovers and behaves erratically - works once,
+		// then does nothing, then works again.
+		if (c.activeCount >= 2) {
+			c.ids[0] = 0;
+			c.ids[1] = 0;
+			c.activeCount = 0;
+			ResetTracking();
+			LogF("  down: cleared stale contacts");
+		}
 		AddPoint(id, pt);
 		c.inGesture = true;
-		return TP_CONSUMED;
+		return true;
 	}
 
 	if (msg == WM_POINTERUP || msg == WM_POINTERCAPTURECHANGED) {
 		RemovePoint(id);
-		return TP_CONSUMED;
+		return true;
 	}
 
 	if (msg == WM_POINTERUPDATE) {
-		if (!c.inGesture) return TP_NONE;
+		if (!c.inGesture) return false;
 		UpdatePoint(id, pt);
 
 		POINT mid;
 		int dist = 0;
-		if (!GetMid(mid, dist)) return TP_CONSUMED;
+		if (!GetMid(mid, dist)) return true;
 		if (!c.hasMid) {
 			c.lastMid = mid;
 			c.lastDist = dist;
 			c.hasMid = true;
-			return TP_CONSUMED;
+			return true;
 		}
 
 		int rawX = (int)mid.x - (int)c.lastMid.x;
@@ -392,68 +390,55 @@ inline int OnPointer(UINT msg, WPARAM wParam, int& outDx, int& outDy, double& ou
 		int dDist = dist - prevDist;
 		c.lastMid = mid;
 		c.lastDist = dist;
-		if (rawX == 0 && rawY == 0 && dDist == 0) return TP_CONSUMED;
 
-		int move = (rawX < 0 ? -rawX : rawX) + (rawY < 0 ? -rawY : rawY);
-		int pinch = (dDist < 0 ? -dDist : dDist);
-
-		// Gather evidence first, then commit to a single gesture type for the
-		// rest of the gesture. A per-frame decision flickers between pan and
-		// zoom on finger-separation noise, which looks like the picture
-		// pulsing and jumping while the user is only dragging.
-		c.sumMove += move;
-		c.sumPinch += pinch;
-
-		if (c.gestureMode == GM_UNDECIDED) {
-			if (c.sumMove + c.sumPinch < TP_DECIDE_THRESHOLD) return TP_CONSUMED;
-			c.gestureMode = (c.sumPinch * 2 > c.sumMove) ? GM_ZOOM : GM_PAN;
-			LogF("gesture=%s (sumMove=%d sumPinch=%d)",
-				(c.gestureMode == GM_ZOOM) ? "zoom" : "pan", c.sumMove, c.sumPinch);
-			c.accX = 0.0;
-			c.accY = 0.0;
-			return TP_CONSUMED;
-		}
-
-		if (c.gestureMode == GM_ZOOM) {
-			if (c.activeCount < 2 || prevDist <= 0) return TP_CONSUMED;
-			if (pinch < TP_ZOOM_DEADBAND) return TP_CONSUMED;
-			double ratio = (double)dist / (double)prevDist;
-			if (ratio < 0.92) ratio = 0.92;
-			if (ratio > 1.08) ratio = 1.08;
-			if (ratio == 1.0) return TP_CONSUMED;
-			outZoom = ratio;
-			c.zoomCount++;
-			if (c.zoomCount <= 60) {
-				LogF("  zoom dist %d->%d ratio=%.4f", prevDist, dist, ratio);
+		// --- channel 1: finger spread -> zoom ---
+		// Only a real change in spread counts. Drag noise stays far below the
+		// deadband, which is what stops a plain drag from pulsing the zoom.
+		if (c.activeCount >= 2 && prevDist > 0) {
+			int pinch = (dDist < 0) ? -dDist : dDist;
+			if (pinch >= TP_ZOOM_DEADBAND) {
+				double ratio = (double)dist / (double)prevDist;
+				if (ratio < 0.92) ratio = 0.92;
+				if (ratio > 1.08) ratio = 1.08;
+				if (ratio != 1.0) {
+					outZoom = ratio;
+					c.zoomCount++;
+					if (c.zoomCount <= 60) {
+						LogF("  zoom dist %d->%d ratio=%.4f", prevDist, dist, ratio);
+					}
+				}
 			}
-			return TP_ZOOM;
 		}
 
+		// --- channel 2: midpoint travel -> pan ---
 		// himetric -> pixels, keeping the sub-pixel remainder so that a slow
 		// drag still accumulates motion instead of rounding to zero forever.
-		double sc = ComputeScale(pi.sourceDevice);
-		c.accX += (double)rawX * sc;
-		c.accY += (double)rawY * sc;
-		int px = (int)c.accX;
-		int py = (int)c.accY;
-		c.accX -= (double)px;
-		c.accY -= (double)py;
-		if (c.invertY) py = -py;
-		if (px == 0 && py == 0) return TP_CONSUMED;
-
-		outDx = px;
-		outDy = py;
-		c.panCount++;
-		c.totalDx += px;
-		c.totalDy += py;
-		if (c.panCount <= 80) {
-			LogF("  pan raw=(%d,%d) px=(%d,%d) scale=%.4f active=%d dist=%d",
-				rawX, rawY, px, py, sc, c.activeCount, dist);
+		if (rawX != 0 || rawY != 0) {
+			double sc = ComputeScale(pi.sourceDevice);
+			c.accX += (double)rawX * sc;
+			c.accY += (double)rawY * sc;
+			int px = (int)c.accX;
+			int py = (int)c.accY;
+			c.accX -= (double)px;
+			c.accY -= (double)py;
+			if (c.invertY) py = -py;
+			if (px != 0 || py != 0) {
+				outDx = px;
+				outDy = py;
+				c.panCount++;
+				c.totalDx += px;
+				c.totalDy += py;
+				if (c.panCount <= 80) {
+					LogF("  pan raw=(%d,%d) px=(%d,%d) scale=%.4f active=%d dist=%d",
+						rawX, rawY, px, py, sc, c.activeCount, dist);
+				}
+			}
 		}
-		return TP_PAN;
+
+		return true;
 	}
 
-	return c.inGesture ? TP_CONSUMED : TP_NONE;
+	return c.inGesture;
 }
 
 // Call once, after the main window exists.
@@ -470,9 +455,6 @@ inline void Init(HWND hwnd) {
 	c.ids[1] = 0;
 	c.hasMid = false;
 	c.lastDist = 0;
-	c.gestureMode = GM_UNDECIDED;
-	c.sumMove = 0;
-	c.sumPinch = 0;
 	c.msgCount = 0;
 	c.panCount = 0;
 	c.zoomCount = 0;
