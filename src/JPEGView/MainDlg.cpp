@@ -985,9 +985,12 @@ LRESULT CMainDlg::OnPointerUpdate(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, B
 		}
 	} else if (r == TouchpadHook::TP_ZOOM) {
 		if (zr > 0.0 && zr != 1.0) {
-			// Same habit as the browser userscript: zoom anchored at the cursor,
-			// so whatever is under the pointer stays put while scaling.
-			PerformZoom(GetZoom() * zr, false, true, false);
+			// Anchor the zoom at the cursor, like the browser userscript, but
+			// only when the cursor really is inside the client area - a stale
+			// anchor outside the window would make the image jump sideways.
+			CPoint mp = GetMousePos();
+			BOOL bAnchor = m_clientRect.PtInRect(mp) ? TRUE : FALSE;
+			PerformZoom(GetZoom() * zr, false, bAnchor ? true : false, false);
 		}
 	}
 	bHandled = TRUE;
