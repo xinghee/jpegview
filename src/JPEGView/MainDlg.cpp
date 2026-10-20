@@ -962,7 +962,8 @@ LRESULT CMainDlg::OnMouseWheel(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, 
 // ---------------------------------------------------------------------------
 LRESULT CMainDlg::OnPointerDown(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 	int dx = 0, dy = 0;
-	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy)) {
+	double zr = 1.0;
+	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy, zr) != TouchpadHook::TP_NONE) {
 		bHandled = TRUE;
 		return 0;
 	}
@@ -972,20 +973,31 @@ LRESULT CMainDlg::OnPointerDown(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, BOO
 
 LRESULT CMainDlg::OnPointerUpdate(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 	int dx = 0, dy = 0;
-	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy)) {
+	double zr = 1.0;
+	int r = TouchpadHook::OnPointer(uMsg, wParam, dx, dy, zr);
+	if (r == TouchpadHook::TP_NONE) {
+		bHandled = FALSE;
+		return 0;
+	}
+	if (r == TouchpadHook::TP_PAN) {
 		if (dx != 0 || dy != 0) {
 			PerformPan(dx, dy, false);
 		}
-		bHandled = TRUE;
-		return 0;
+	} else if (r == TouchpadHook::TP_ZOOM) {
+		if (zr > 0.0 && zr != 1.0) {
+			// Same habit as the browser userscript: zoom anchored at the cursor,
+			// so whatever is under the pointer stays put while scaling.
+			PerformZoom(GetZoom() * zr, false, true, false);
+		}
 	}
-	bHandled = FALSE;
+	bHandled = TRUE;
 	return 0;
 }
 
 LRESULT CMainDlg::OnPointerUp(UINT uMsg, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled) {
 	int dx = 0, dy = 0;
-	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy)) {
+	double zr = 1.0;
+	if (TouchpadHook::OnPointer(uMsg, wParam, dx, dy, zr) != TouchpadHook::TP_NONE) {
 		bHandled = TRUE;
 		return 0;
 	}
