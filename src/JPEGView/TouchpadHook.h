@@ -84,6 +84,7 @@ struct PI_LOCAL {
 
 typedef BOOL (WINAPI *PFN_GetPointerInfo)(UINT32 pointerId, PVOID pointerInfo);
 typedef BOOL (WINAPI *PFN_RegisterTouchpadCapableWindow)(HWND hWnd, BOOL fEnable);
+typedef BOOL (WINAPI *PFN_GetPointerDeviceRects)(HANDLE device, RECT* pointerDeviceRect, RECT* displayRect);
 
 // RegisterTouchpadCapableWindow is exported by ordinal only on Windows 11.
 #define TP_ORDINAL_REGISTER_WINDOW 2689
@@ -106,6 +107,10 @@ struct Ctx {
 	int     panCount;
 	long    totalDx;
 	long    totalDy;
+	double  scale;      // pixels per himetric unit
+	bool    scaleKnown;
+	double  accX;       // sub-pixel remainder, without this slow drags never move
+	double  accY;
 };
 
 inline Ctx& C() {
@@ -169,11 +174,63 @@ inline PFN_GetPointerInfo ResolveGetPointerInfo() {
 	return fn;
 }
 
+inline PFN_GetPointerDeviceRects ResolveDeviceRects() {
+	static PFN_GetPointerDeviceRects fn = NULL;
+	static bool tried = false;
+	if (!tried) {
+		tried = true;
+		HMODULE h = GetModuleHandleW(L"user32.dll");
+		if (h != NULL) {
+			fn = (PFN_GetPointerDeviceRects)GetProcAddress(h, "GetPointerDeviceRects");
+		}
+	}
+	return fn;
+}
+
+// Touchpad coordinates are himetric (0.01 mm), so a raw delta is useless for
+// moving pixels. GetPointerDeviceRects gives the touchpad size and the display
+// size in the same units family; the ratio converts himetric to pixels.
+// Falls back to a typical laptop ratio when the call is unavailable.
+inline double ComputeScale(HANDLE device) {
+	Ctx& c = C();
+	if (c.scaleKnown) return c.scale;
+	c.scale = 0.2;
+	c.scaleKnown = true;
+
+	PFN_GetPointerDeviceRects fn = ResolveDeviceRects();
+	if (fn == NULL || device == NULL) {
+		LogF("scale: fallback %.4f (GetPointerDeviceRects unavailable)", c.scale);
+		return c.scale;
+	}
+	RECT dev;
+	RECT scr;
+	ZeroMemory(&dev, sizeof(dev));
+	ZeroMemory(&scr, sizeof(scr));
+	if (!fn(device, &dev, &scr)) {
+		LogF("scale: fallback %.4f (GetPointerDeviceRects failed, err=%lu)",
+			c.scale, (unsigned long)GetLastError());
+		return c.scale;
+	}
+	double dw = (double)(dev.right - dev.left);
+	double sw = (double)(scr.right - scr.left);
+	if (dw > 0.0 && sw > 0.0) {
+		c.scale = sw / dw;
+		LogF("scale=%.5f px/himetric (device %dx%d, screen %dx%d)", c.scale,
+			(int)dw, (int)(dev.bottom - dev.top), (int)sw, (int)(scr.bottom - scr.top));
+	} else {
+		LogF("scale: fallback %.4f (bad rects device=%dx%d screen=%dx%d)", c.scale,
+			(int)dw, (int)(dev.bottom - dev.top), (int)sw, (int)(scr.bottom - scr.top));
+	}
+	return c.scale;
+}
+
 inline void ResetTracking() {
 	Ctx& c = C();
 	c.hasMid = false;
 	c.lastMid.x = 0;
 	c.lastMid.y = 0;
+	c.accX = 0.0;
+	c.accY = 0.0;
 }
 
 inline void AddPoint(UINT32 id, POINT pt) {
@@ -257,12 +314,13 @@ inline bool OnPointer(UINT msg, WPARAM wParam, int& outDx, int& outDy) {
 	ZeroMemory(&pi, sizeof(pi));
 	if (!gpi(id, &pi)) return c.inGesture;
 
-	POINT pt = pi.ptPixelLocation;
+	// ptPixelLocation holds the mouse cursor position when the gesture started
+	// and never changes during it - reading it yields a constant. The contact
+	// position relative to the device lives in ptHimetricLocation (0.01 mm).
+	POINT pt = pi.ptHimetricLocation;
 	c.msgCount++;
-	// Log BEFORE the type check - otherwise a wrong pointer type silently
-	// disables the whole hook with no trace in the log at all.
 	if (c.msgCount <= 400) {
-		LogF("ptr msg=0x%04X id=%u type=%d pos=(%d,%d) flags=0x%08X",
+		LogF("ptr msg=0x%04X id=%u type=%d him=(%d,%d) flags=0x%08X",
 			(unsigned)msg, (unsigned)id, (int)pi.pointerType, (int)pt.x, (int)pt.y, (unsigned)pi.pointerFlags);
 	}
 	if (pi.pointerType != PT_TOUCHPAD) return false;
@@ -289,20 +347,31 @@ inline bool OnPointer(UINT msg, WPARAM wParam, int& outDx, int& outDy) {
 			c.hasMid = true;
 			return true;
 		}
-		int dx = (int)mid.x - (int)c.lastMid.x;
-		int dy = (int)mid.y - (int)c.lastMid.y;
+		int rawX = (int)mid.x - (int)c.lastMid.x;
+		int rawY = (int)mid.y - (int)c.lastMid.y;
 		c.lastMid = mid;
-		if (dx == 0 && dy == 0) return true;
+		if (rawX == 0 && rawY == 0) return true;
 
-		if (c.invertY) dy = -dy;
-		outDx = dx;
-		outDy = dy;
+		// himetric -> pixels, keeping the sub-pixel remainder so that a slow
+		// drag still accumulates motion instead of rounding to zero forever.
+		double sc = ComputeScale(pi.sourceDevice);
+		c.accX += (double)rawX * sc;
+		c.accY += (double)rawY * sc;
+		int px = (int)c.accX;
+		int py = (int)c.accY;
+		c.accX -= (double)px;
+		c.accY -= (double)py;
+		if (c.invertY) py = -py;
+		if (px == 0 && py == 0) return true;
+
+		outDx = px;
+		outDy = py;
 		c.panCount++;
-		c.totalDx += dx;
-		c.totalDy += dy;
+		c.totalDx += px;
+		c.totalDy += py;
 		if (c.panCount <= 80) {
-			LogF("  pan dx=%d dy=%d (mid=%d,%d active=%d dist=%d)", dx, dy,
-				(int)mid.x, (int)mid.y, c.activeCount, dist);
+			LogF("  pan raw=(%d,%d) px=(%d,%d) scale=%.4f active=%d dist=%d",
+				rawX, rawY, px, py, sc, c.activeCount, dist);
 		}
 		return true;
 	}
@@ -327,6 +396,10 @@ inline void Init(HWND hwnd) {
 	c.panCount = 0;
 	c.totalDx = 0;
 	c.totalDy = 0;
+	c.scale = 0.0;
+	c.scaleKnown = false;
+	c.accX = 0.0;
+	c.accY = 0.0;
 
 	OpenLog();
 	if (c.log == NULL) return;
