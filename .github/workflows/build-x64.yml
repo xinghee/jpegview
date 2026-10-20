@@ -76,6 +76,7 @@ jobs:
           }
 
       - name: 编译（工具集自适应 + 失败自动换工具集重试）
+        id: build
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -126,6 +127,7 @@ jobs:
             Write-Host "工具集 $ts 失败，exit=$LASTEXITCODE"
           }
           if (-not $ok) { throw "两种工具集均编译失败，请看上方日志" }
+          "toolset=$ts" >> $env:GITHUB_OUTPUT
 
       - name: 校验产物
         shell: pwsh
@@ -147,10 +149,66 @@ jobs:
             if (-not (Test-Path $f)) { Write-Host "警告: 缺少 $d（对应格式将不可用）" }
           }
 
+      - name: 生成构建标记
+        id: stamp
+        shell: pwsh
+        run: |
+          # 每次构建产物的名字带上"时间戳 + commit 短哈希"，避免并列几次编译后
+          # 下回来一堆同名 zip 分不清谁是谁。
+          $ts    = Get-Date -Format "yyyyMMdd-HHmm"
+          $sha   = "${{ github.sha }}"
+          $short = $sha.Substring(0, 7)
+          $tag   = "$ts-$short"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+          $out = "src/JPEGView/bin/x64/Release"
+          $exe = Join-Path $out "JPEGView.exe"
+          $ver = if (Test-Path $exe) { (Get-Item $exe).VersionInfo.FileVersion } else { "unknown" }
+          $msg = git log -1 --pretty=%s
+
+          $lines = @(
+            "JPEGView - unofficial custom build",
+            "==================================",
+            "",
+            "tag        : $tag",
+            "built      : $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))",
+            "commit     : $sha",
+            "commit msg : $msg",
+            "exe version: $ver",
+            "branch     : ${{ github.ref_name }}",
+            "runner     : windows-2022",
+            "toolset    : ${{ steps.build.outputs.toolset }}",
+            "upstream   : https://github.com/sylikc/jpegview",
+            "",
+            "Local changes vs upstream",
+            "-------------------------",
+            "  + src/JPEGView/TouchpadHook.h   two-finger touchpad pan",
+            "                                  (RegisterTouchpadCapableWindow)",
+            "  ~ src/JPEGView/MainDlg.h        WM_POINTER message map",
+            "  ~ src/JPEGView/MainDlg.cpp      pointer handlers -> PerformPan",
+            "",
+            "Runtime switches (environment variables)",
+            "----------------------------------------",
+            "  JPEGVIEW_NO_TOUCHPAD=1        disable the touchpad hook entirely",
+            "  JPEGVIEW_TOUCHPAD_INVERT_Y=1  invert the vertical pan direction",
+            "",
+            "Debug log",
+            "---------",
+            "  JPEGView-touchpad.log is written next to the exe on every start.",
+            "  It reports whether the Win11 touchpad API was found and registered,",
+            "  and records each pointer message and pan delta.",
+            "",
+            "Note",
+            "----",
+            "  This build is GPL-2.0-or-later, same as upstream JPEGView."
+          )
+          $lines | Set-Content -Path (Join-Path $out "BUILD-INFO.txt") -Encoding UTF8
+          Write-Host "BUILD-INFO.txt 已写入, tag=$tag"
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: JPEGView-x64-Release
+          name: JPEGView-x64-${{ steps.stamp.outputs.tag }}
           path: src/JPEGView/bin/x64/Release/
           if-no-files-found: error
           retention-days: 30
