@@ -155,7 +155,10 @@ jobs:
         run: |
           # 每次构建产物的名字带上"时间戳 + commit 短哈希"，避免并列几次编译后
           # 下回来一堆同名 zip 分不清谁是谁。
-          $ts    = Get-Date -Format "yyyyMMdd-HHmm"
+          # runner 的时区是 UTC，直接用 Get-Date 会得到 8 小时前的时间，
+          # 对着本地文件看会让人困惑，所以统一转成北京时间。
+          $nowBJ = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId((Get-Date), 'China Standard Time')
+          $ts    = $nowBJ.ToString("yyyyMMdd-HHmm")
           $sha   = "${{ github.sha }}"
           $short = $sha.Substring(0, 7)
           $tag   = "$ts-$short"
@@ -171,7 +174,7 @@ jobs:
             "==================================",
             "",
             "tag        : $tag",
-            "built      : $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))",
+            "built      : $($nowBJ.ToString('yyyy-MM-dd HH:mm:ss')) (UTC+8)",
             "commit     : $sha",
             "commit msg : $msg",
             "exe version: $ver",
