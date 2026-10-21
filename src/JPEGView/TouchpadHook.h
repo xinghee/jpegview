@@ -179,7 +179,18 @@ inline void OpenLog() {
 	full[0] = '\0';
 	sprintf_s(full, MAX_PATH, "%s-touchpad.log", path);
 	if (fopen_s(&c.log, full, "w") != 0) {
+		// Installing under Program Files makes the app directory read-only for
+		// a normal user, so fall back to the temp folder. Logging must never
+		// be the reason the feature stops working.
 		c.log = NULL;
+		char tmp[MAX_PATH];
+		tmp[0] = '\0';
+		if (GetTempPathA(MAX_PATH, tmp) > 0) {
+			char alt[MAX_PATH];
+			alt[0] = '\0';
+			sprintf_s(alt, MAX_PATH, "%sJPEGView-touchpad.log", tmp);
+			fopen_s(&c.log, alt, "w");
+		}
 	}
 }
 
@@ -546,8 +557,9 @@ inline void Init(HWND hwnd) {
 	c.accY = 0.0;
 
 	OpenLog();
-	if (c.log == NULL) return;
 	LogF("=== JPEGView touchpad hook ===");
+	// Deliberately no early return when the log cannot be opened: the hook has
+	// to work even if there is nowhere to write diagnostics.
 	LogF("sizeof(PI_LOCAL)=%d (host x64 expects 96)", (int)sizeof(PI_LOCAL));
 
 	char env[16];
