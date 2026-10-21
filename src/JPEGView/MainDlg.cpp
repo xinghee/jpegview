@@ -745,6 +745,9 @@ LRESULT CMainDlg::OnLoadFileAsynch(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lPar
 }
 
 LRESULT CMainDlg::OnClose(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled) {
+	// Flush the touchpad debug log before the window goes away, so the summary
+	// line is actually written instead of the file just being abandoned.
+	TouchpadHook::Shutdown();
 	GetWindowRect(m_windowRectOnClose);
 	bHandled = FALSE;
 	return 0;
