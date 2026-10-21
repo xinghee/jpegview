@@ -53,14 +53,19 @@ namespace TouchpadHook {
 // (himetric = 0.01 mm), and keeps that class until the last finger lifts.
 #define TP_DECIDE_THRESHOLD 30
 
-// How much the spread change must dominate the midpoint travel before the
-// gesture counts as a pinch.
-// Replaying three recorded sessions settled this: during a pure drag the
-// accumulated spread change is 0..11 while the midpoint travels hundreds, so
-// the two are ~30x apart. During a real pinch the spread change is actually
-// SMALLER relative to travel than expected (145 vs 104, 934 vs 663), so any
-// bias above ~1.4 rejects genuine pinches. 1.0 separates both cases cleanly.
-#define TP_PAN_BIAS 1.0
+// Gesture classification is based on the angle between the two fingers'
+// displacement vectors, which is what physically separates the two gestures:
+//   drag  -> both fingers travel the SAME way      (cos ~ +1)
+//   pinch -> fingers travel OPPOSITE ways          (cos ~ -1)
+// Recorded sessions showed drag at +0.93..+1.00 and pinch at -0.87..-0.95,
+// with nothing in between, so a plain cos < 0 test would already work.
+#define TP_SAME_COS  0.3
+#define TP_OPP_COS  (-0.3)
+
+// A finger moving less than this (himetric) is treated as stationary and the
+// frame is skipped - that also skips the half-updated frames where only one
+// finger has been reported yet.
+#define TP_MIN_FINGER_MOVE 4.0
 
 #define GM_UNDECIDED 0
 #define GM_PAN       1
@@ -130,9 +135,11 @@ struct Ctx {
 	POINT   pts[2];
 	POINT   lastMid;
 	int     lastDist;
+	UINT32  frameId;       // last measured pointer frame
 	int     gestureMode;   // GM_UNDECIDED / GM_PAN / GM_ZOOM, locked per gesture
-	int     sumMove;
-	int     sumPinch;
+	POINT   prevPts[2];    // per-finger position at the previous frame
+	double  sumSame;       // accumulated motion while both fingers moved alike
+	double  sumOpp;        // accumulated motion while both fingers moved apart
 	int     msgCount;
 	int     panCount;
 	int     zoomCount;
@@ -262,9 +269,10 @@ inline void ResetTracking() {
 	c.lastMid.y = 0;
 	c.accX = 0.0;
 	c.accY = 0.0;
+	c.frameId = 0;
 	c.gestureMode = GM_UNDECIDED;
-	c.sumMove = 0;
-	c.sumPinch = 0;
+	c.sumSame = 0.0;
+	c.sumOpp = 0.0;
 }
 
 inline void AddPoint(UINT32 id, POINT pt) {
@@ -279,6 +287,7 @@ inline void AddPoint(UINT32 id, POINT pt) {
 		if (c.ids[i] == 0) {
 			c.ids[i] = id;
 			c.pts[i] = pt;
+			c.prevPts[i] = pt;
 			c.activeCount++;
 			ResetTracking();
 			return;
@@ -311,6 +320,8 @@ inline void RemovePoint(UINT32 id) {
 			c.ids[i] = 0;
 			c.pts[i].x = 0;
 			c.pts[i].y = 0;
+			c.prevPts[i].x = 0;
+			c.prevPts[i].y = 0;
 			if (c.activeCount > 0) c.activeCount--;
 			ResetTracking();
 			if (c.activeCount == 0) c.inGesture = false;
@@ -366,8 +377,9 @@ inline bool OnPointer(UINT msg, WPARAM wParam, int& outDx, int& outDy, double& o
 	POINT pt = pi.ptHimetricLocation;
 	c.msgCount++;
 	if (c.msgCount <= 400) {
-		LogF("ptr msg=0x%04X id=%u type=%d him=(%d,%d) flags=0x%08X",
-			(unsigned)msg, (unsigned)id, (int)pi.pointerType, (int)pt.x, (int)pt.y, (unsigned)pi.pointerFlags);
+		LogF("ptr msg=0x%04X id=%u type=%d him=(%d,%d) frame=%u flags=0x%08X",
+			(unsigned)msg, (unsigned)id, (int)pi.pointerType, (int)pt.x, (int)pt.y,
+			(unsigned)pi.frameId, (unsigned)pi.pointerFlags);
 	}
 	if (pi.pointerType != PT_TOUCHPAD) return false;
 
@@ -394,85 +406,109 @@ inline bool OnPointer(UINT msg, WPARAM wParam, int& outDx, int& outDy, double& o
 
 	if (msg == WM_POINTERUPDATE) {
 		if (!c.inGesture) return false;
+
+		// Frame sync.
+		// WM_POINTERUPDATE carries ONE finger at a time. Computing the midpoint
+		// right after each message therefore yields a snapshot that is half new
+		// and half stale: the finger spread appears to jump by roughly half a
+		// finger per message, which is easily large enough to look like a pinch
+		// and hijack the gesture. Settling the PREVIOUS frame when a new frameId
+		// arrives fixes it - at that moment every finger of that frame has been
+		// written, so the snapshot is consistent. Costs one frame of latency.
+		if (c.frameId != pi.frameId) {
+			POINT mid;
+			int dist = 0;
+			if (GetMid(mid, dist)) {
+				if (!c.hasMid) {
+					c.lastMid = mid;
+					c.lastDist = dist;
+					c.hasMid = true;
+				} else {
+					int rawX = (int)mid.x - (int)c.lastMid.x;
+					int rawY = (int)mid.y - (int)c.lastMid.y;
+					int prevDist = c.lastDist;
+					int dDist = dist - prevDist;
+					c.lastMid = mid;
+					c.lastDist = dist;
+
+					// Where each finger moved this frame. Comparing the two
+					// directions is what separates drag from pinch: dragging
+					// sends both the same way, pinching sends them apart.
+					double d0x = (double)(c.pts[0].x - c.prevPts[0].x);
+					double d0y = (double)(c.pts[0].y - c.prevPts[0].y);
+					double d1x = (double)(c.pts[1].x - c.prevPts[1].x);
+					double d1y = (double)(c.pts[1].y - c.prevPts[1].y);
+					c.prevPts[0] = c.pts[0];
+					c.prevPts[1] = c.pts[1];
+					double len0 = sqrt(d0x * d0x + d0y * d0y);
+					double len1 = sqrt(d1x * d1x + d1y * d1y);
+
+					if (c.activeCount >= 2 && len0 >= TP_MIN_FINGER_MOVE && len1 >= TP_MIN_FINGER_MOVE) {
+						double dot = d0x * d1x + d0y * d1y;
+						double cosv = dot / (len0 * len1);
+						if (cosv > TP_SAME_COS) {
+							c.sumSame += (len0 + len1) * 0.5;
+						} else if (cosv < TP_OPP_COS) {
+							c.sumOpp += (len0 < len1) ? len0 : len1;
+						}
+						if (c.gestureMode == GM_UNDECIDED && c.sumSame + c.sumOpp >= TP_DECIDE_THRESHOLD) {
+							c.gestureMode = (c.sumOpp > c.sumSame) ? GM_ZOOM : GM_PAN;
+							LogF("gesture=%s (same=%.0f opp=%.0f)",
+								(c.gestureMode == GM_ZOOM) ? "zoom" : "pan", c.sumSame, c.sumOpp);
+							c.accX = 0.0;
+							c.accY = 0.0;
+						}
+					}
+
+					// Wait for evidence before doing anything. Costs two or
+					// three frames of latency, but avoids moving the image the
+					// wrong way for those frames when the gesture turns out to
+					// be a pinch.
+					if (c.gestureMode == GM_UNDECIDED) return true;
+
+					int pinch = (dDist < 0) ? -dDist : dDist;
+					if (c.gestureMode == GM_ZOOM) {
+						if (c.activeCount >= 2 && prevDist > 0 && pinch >= TP_ZOOM_DEADBAND) {
+							double ratio = (double)dist / (double)prevDist;
+							if (ratio < 0.92) ratio = 0.92;
+							if (ratio > 1.08) ratio = 1.08;
+							if (ratio != 1.0) {
+								outZoom = ratio;
+								c.zoomCount++;
+								if (c.zoomCount <= 60) {
+									LogF("  zoom dist %d->%d ratio=%.4f", prevDist, dist, ratio);
+								}
+							}
+						}
+					} else {
+						if (rawX != 0 || rawY != 0) {
+							double sc = ComputeScale(pi.sourceDevice);
+							c.accX += (double)rawX * sc;
+							c.accY += (double)rawY * sc;
+							int px = (int)c.accX;
+							int py = (int)c.accY;
+							c.accX -= (double)px;
+							c.accY -= (double)py;
+							if (c.invertY) py = -py;
+							if (px != 0 || py != 0) {
+								outDx = px;
+								outDy = py;
+								c.panCount++;
+								c.totalDx += px;
+								c.totalDy += py;
+								if (c.panCount <= 80) {
+									LogF("  pan raw=(%d,%d) px=(%d,%d) scale=%.4f active=%d dist=%d",
+										rawX, rawY, px, py, sc, c.activeCount, dist);
+								}
+							}
+						}
+					}
+				}
+			}
+			c.frameId = pi.frameId;
+		}
+
 		UpdatePoint(id, pt);
-
-		POINT mid;
-		int dist = 0;
-		if (!GetMid(mid, dist)) return true;
-		if (!c.hasMid) {
-			c.lastMid = mid;
-			c.lastDist = dist;
-			c.hasMid = true;
-			return true;
-		}
-
-		int rawX = (int)mid.x - (int)c.lastMid.x;
-		int rawY = (int)mid.y - (int)c.lastMid.y;
-		int prevDist = c.lastDist;
-		int dDist = dist - prevDist;
-		c.lastMid = mid;
-		c.lastDist = dist;
-		if (rawX == 0 && rawY == 0 && dDist == 0) return true;
-
-		int move = (rawX < 0 ? -rawX : rawX) + (rawY < 0 ? -rawY : rawY);
-		int pinch = (dDist < 0) ? -dDist : dDist;
-		c.sumMove += move;
-		c.sumPinch += pinch;
-
-		// Classify once per gesture, then keep the decision until the last
-		// finger lifts. Deciding per frame made a drag flicker between pan and
-		// zoom, which reads as the picture pulsing and jumping.
-		if (c.gestureMode == GM_UNDECIDED) {
-			if (c.sumMove + c.sumPinch < TP_DECIDE_THRESHOLD) return true;
-			c.gestureMode = ((double)c.sumPinch > (double)c.sumMove * TP_PAN_BIAS && c.activeCount >= 2)
-				? GM_ZOOM : GM_PAN;
-			LogF("gesture=%s (sumMove=%d sumPinch=%d)",
-				(c.gestureMode == GM_ZOOM) ? "zoom" : "pan", c.sumMove, c.sumPinch);
-			c.accX = 0.0;
-			c.accY = 0.0;
-			return true;
-		}
-
-		if (c.gestureMode == GM_ZOOM) {
-			if (c.activeCount < 2 || prevDist <= 0) return true;
-			if (pinch < TP_ZOOM_DEADBAND) return true;
-			double ratio = (double)dist / (double)prevDist;
-			if (ratio < 0.92) ratio = 0.92;
-			if (ratio > 1.08) ratio = 1.08;
-			if (ratio != 1.0) {
-				outZoom = ratio;
-				c.zoomCount++;
-				if (c.zoomCount <= 60) {
-					LogF("  zoom dist %d->%d ratio=%.4f", prevDist, dist, ratio);
-				}
-			}
-			return true;
-		}
-
-		// GM_PAN: himetric -> pixels, keeping the sub-pixel remainder so that a
-		// slow drag still accumulates motion instead of rounding to zero forever.
-		if (rawX != 0 || rawY != 0) {
-			double sc = ComputeScale(pi.sourceDevice);
-			c.accX += (double)rawX * sc;
-			c.accY += (double)rawY * sc;
-			int px = (int)c.accX;
-			int py = (int)c.accY;
-			c.accX -= (double)px;
-			c.accY -= (double)py;
-			if (c.invertY) py = -py;
-			if (px != 0 || py != 0) {
-				outDx = px;
-				outDy = py;
-				c.panCount++;
-				c.totalDx += px;
-				c.totalDy += py;
-				if (c.panCount <= 80) {
-					LogF("  pan raw=(%d,%d) px=(%d,%d) scale=%.4f active=%d dist=%d",
-						rawX, rawY, px, py, sc, c.activeCount, dist);
-				}
-			}
-		}
-
 		return true;
 	}
 
@@ -493,9 +529,12 @@ inline void Init(HWND hwnd) {
 	c.ids[1] = 0;
 	c.hasMid = false;
 	c.lastDist = 0;
+	c.frameId = 0;
 	c.gestureMode = GM_UNDECIDED;
-	c.sumMove = 0;
-	c.sumPinch = 0;
+	c.sumSame = 0.0;
+	c.sumOpp = 0.0;
+	c.prevPts[0].x = 0; c.prevPts[0].y = 0;
+	c.prevPts[1].x = 0; c.prevPts[1].y = 0;
 	c.msgCount = 0;
 	c.panCount = 0;
 	c.zoomCount = 0;
