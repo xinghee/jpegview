@@ -556,11 +556,18 @@ inline void Init(HWND hwnd) {
 	c.accX = 0.0;
 	c.accY = 0.0;
 
-	OpenLog();
-	LogF("=== JPEGView touchpad hook ===");
-	// Deliberately no early return when the log cannot be opened: the hook has
-	// to work even if there is nowhere to write diagnostics.
-	LogF("sizeof(PI_LOCAL)=%d (host x64 expects 96)", (int)sizeof(PI_LOCAL));
+	// Diagnostics are opt-in. This is a viewer, not a debugging build: writing a
+	// log on every launch is pure overhead, and under Program Files the folder
+	// is read-only for a normal user anyway.
+	// Set JPEGVIEW_TOUCHPAD_LOG=1 to get one session log (written next to the
+	// exe, or to the temp folder when that is not writable).
+	char logEnv[8];
+	logEnv[0] = '\0';
+	if (GetEnvironmentVariableA("JPEGVIEW_TOUCHPAD_LOG", logEnv, sizeof(logEnv)) > 0 && logEnv[0] == '1') {
+		OpenLog();
+		LogF("=== JPEGView touchpad hook ===");
+		LogF("sizeof(PI_LOCAL)=%d (host x64 expects 96)", (int)sizeof(PI_LOCAL));
+	}
 
 	char env[16];
 	env[0] = '\0';
