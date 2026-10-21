@@ -1,185 +1,94 @@
-[![Documentation](https://img.shields.io/badge/Docs-Outdated-yellowgreen)](https://htmlpreview.github.io/?https://github.com/sylikc/jpegview/blob/master/src/JPEGView/Config/readme.html) [![Localization Progress](https://img.shields.io/badge/Localized-91%25-blueviolet)](#Localization) [![Build x64](https://github.com/sylikc/jpegview/actions/workflows/build-release-x64.yml/badge.svg?branch=master)](https://github.com/sylikc/jpegview/actions/workflows/build-release-x64.yml) [![OS Support](https://img.shields.io/badge/Windows-XP%20%7C%207%20%7C%208%20%7C%2010%20%7C%2011-blue)](#) [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue)](https://github.com/sylikc/jpegview/blob/master/LICENSE.txt)
+# JPEGView 触控板增强版
 
-[![Latest GitHub Release](https://img.shields.io/github/v/release/sylikc/jpegview?label=GitHub&style=social)](https://github.com/sylikc/jpegview/releases)[![Downloads](https://badgen.net/github/assets-dl/sylikc/jpegview?cache=3600&color=grey&label=)](#) [![WinGet](https://repology.org/badge/version-for-repo/winget/jpegview.svg?allow_ignored=1&header=WinGet)](https://winstall.app/apps/sylikc.JPEGView) [![PortableApps](https://img.shields.io/badge/PortableApps-Current-green)](https://portableapps.com/apps/graphics_pictures/jpegview_portable) [![Scoop](https://repology.org/badge/version-for-repo/scoop/jpegview-fork.svg?header=Scoop)](https://scoop.sh/#/apps?q=%22jpegview-fork%22) [![Chocolatey](https://img.shields.io/chocolatey/v/jpegview)](https://community.chocolatey.org/packages/jpegview) [![Npackd](https://repology.org/badge/version-for-repo/npackd_stable/jpegview.svg?allow_ignored=1&header=Npackd)](https://www.npackd.org/p/jpegview)
+> 这是 [sylikc/jpegview](https://github.com/sylikc/jpegview) 的**个人分支**，不是官方版本。
+> 在原版基础上增加了笔记本精密触控板的双指手势支持，其余功能与原版完全一致。
 
-# JPEGView - Image Viewer and Editor
+## 这是什么
 
-This is the official re-release of JPEGView.
+JPEGView 是一个轻量、快速、高度可配置的图片查看与编辑工具，内置支持 JPEG、PNG、WEBP、JXL、HEIF/HEIC、AVIF、TIFF、PSD、TGA 以及各厂相机 RAW 等格式。
 
-## Description
+本分支只做了一件事：**让精密触控板的双指手势真正可用**。
 
-JPEGView is a lean, fast and highly configurable image viewer/editor with a minimal GUI.
+## 新增的手势
 
-### Formats Supported
+| 手势 | 效果 |
+|---|---|
+| 双指拖动 | 平移画面，上下左右四个方向均可 |
+| 双指捏合 | 缩放画面，张开放大、收拢缩小 |
 
-JPEGView has built-in support the following formats:
+鼠标操作完全不受影响，仍与原版一致。
 
-* Popular: JPEG, GIF
-* Lossless: BMP, PNG, TIFF, PSD
-* Web: WEBP, JXL, HEIF/HEIC, AVIF
-* Legacy: TGA, WDP, HDP, JXR
-* Camera RAW formats:
-  * Adobe (DNG), Canon (CRW, CR2, CR3), Nikon (NEF, NRW), Sony (ARW, SR2)
-  * Olympus (ORF), Panasonic (RW2), Fujifilm (RAF)
-  * Sigma (X3F), Pentax (PEF), Minolta (MRW), Kodak (KDC, DCR)
-  * A full list is available here: [LibRaw supported cameras](https://www.libraw.org/supported-cameras)
+## 为什么需要改
 
-Many additional formats are supported by Windows Imaging Component (WIC)
+Windows 默认会把触控板的双指手势**提前合成为滚轮消息**再交给程序，所以在原版 JPEGView 里，双指拖动会被当成滚轮处理，结果是缩放而不是平移——手感完全不对。
 
-### Basic Image Editor
+本分支调用 `RegisterTouchpadCapableWindow`，让双指手势以 `WM_POINTER` 原始指针消息直接到达窗口，由程序自己决定如何处理。
 
-Basic on-the-fly image processing is provided - allowing adjusting typical parameters:
+不支持该 API 的环境（Windows 10 及更早）会自动退回原行为，不会报错。
 
-* sharpness
-* color balance
-* rotation
-* perspective
-* contrast
-* local under-exposure/over-exposure
+## 改动清单
 
-### Other Features
+| 文件 | 说明 |
+|---|---|
+| `src/JPEGView/TouchpadHook.h` | 新增。触控板手势处理，纯头文件实现，无需登记到工程文件 |
+| `src/JPEGView/MainDlg.h` | 消息映射新增 4 条 `WM_POINTER`，并声明处理函数 |
+| `src/JPEGView/MainDlg.cpp` | 初始化时注册触控板，实现 3 个消息处理函数，关闭窗口时收尾日志 |
 
-* Small and fast, uses AVX2/SSE2 and up to 4 CPU cores
-* High quality resampling filter, preserving sharpness of images
-* Basic image processing tools can be applied realtime during viewing
-* Movie/Slideshow mode - to play folder of JPEGs as movie
+## 实现要点
 
-# Installation
+调试过程中有三个结论值得记录，如果以后要改这块代码，能少走不少弯路。
 
-## Official Releases
+### 1. 手势判定用两指位移的夹角余弦
 
-Official releases will be made to [sylikc's GitHub Releases](https://github.com/sylikc/jpegview/releases) page.  Each release includes:
+拖动时两根手指**同向**移动（余弦接近 +1），捏合时**反向**移动（余弦接近 −1）。实测两者的数据区间完全不重叠，所以不需要任何经验阈值，也就不存在「调大误伤捏合、调小误伤拖动」的两难。
 
-* **Archive Zip/7z** - Portable
-* **Windows Installer MSI** - For Installs
-* **Source code** - Build it yourself
+```cpp
+d0 = 手指0 本帧位移;   d1 = 手指1 本帧位移;
+cos = (d0 · d1) / (|d0| × |d1|);
 
-## Portable
-
-JPEGView _does not require installation_ to run.  Just **unzip, and run** either the 64-bit version, or the 32-bit version depending on which platform you're on.  It can save the settings to the extracted folder and run entirely portable.
-
-## MSI Installer
-
-For those who prefer to have JPEGView installed for All Users, a 32-bit/64-bit installer is available to download starting with v1.0.40.
-
-(Unfortunately, I don't own a code signing certificate yet, so the MSI release is not signed.  Please verify checksums!)
-
-### WinGet
-
-If you're on Windows 11, or Windows 10 (build 1709 or later), you can also download it directly from the official [Microsoft WinGet tool](https://docs.microsoft.com/en-us/windows/package-manager/winget/) repository.  This downloads the latest MSI installer directly from GitHub for installation.
-
-Example Usage:
-
-C:\> `winget search jpegview`
-```
-Name     Id              Version  Source
------------------------------------------
-JPEGView sylikc.JPEGView 1.1.43  winget
+if (cos >  0.3) 拖动证据 += 位移;    // 同向
+if (cos < -0.3) 捏合证据 += 位移;    // 反向
+// 证据够了就按多数决锁定，整段手势不再改变
 ```
 
-C:\> `winget install jpegview`
-```
-Found JPEGView [sylikc.JPEGView] Version 1.1.43
-This application is licensed to you by its owner.
-Microsoft is not responsible for, nor does it grant any licenses to, third-party packages.
-Downloading https://github.com/sylikc/jpegview/releases/download/v1.1.43/JPEGView64_en-us_1.1.43.msi
-  ██████████████████████████████  4.23 MB / 4.23 MB
-Successfully verified installer hash
-Starting package install...
-Successfully installed
-```
+### 2. 必须做帧同步
 
-## PortableApps
+`WM_POINTERUPDATE` 每次只带**一根**手指的位置。如果收到一条消息就立刻计算中点和间距，拿到的是一份「一根新、一根旧」的快照——两指间距会凭空抖动半个手指的距离，这个抖动足以被误判成捏合。
 
-Another option is to use the official [JPEGView on PortableApps](https://portableapps.com/apps/graphics_pictures/jpegview_portable) package.  The PortableApps launcher preserves user settings in a separate directory from the extracted application directory.  This release is signed.
+正确做法是靠 `frameId` 判断帧边界，等**整帧坐标都到齐**再结算。代价是延迟一帧（约 10~16 毫秒），肉眼基本无感。
 
-## Scoop
+### 3. 日志绝不能影响功能
 
-[Scoop](https://scoop.sh/) is a Windows command-line installer and manager for portable applications.
+程序安装到 `Program Files` 时，普通用户对该目录没有写权限。最初的代码是「日志打不开就直接返回」，导致触控板注册代码从未执行——功能整体失效，而且看起来像「怎么移动位置就不能用了」。
 
-To install with Scoop, run the following commands:
+现在日志默认关闭，且无论如何失败都不会中断功能。
 
-```shell
-scoop bucket add extras
-scoop install extras/jpegview-fork
-```
+## 环境变量
 
-After installation, the configuration file is located at `%UserProfile%\scoop\persist\JPEGView-fork\JPEGView.ini`.
+| 变量 | 作用 |
+|---|---|
+| `JPEGVIEW_TOUCHPAD_LOG=1` | 输出一次会话日志（默认关闭，不写任何文件） |
+| `JPEGVIEW_NO_TOUCHPAD=1` | 完全禁用触控板手势 |
+| `JPEGVIEW_TOUCHPAD_INVERT_Y=1` | 反转垂直平移方向 |
 
-## System Requirements
+开启日志时，日志优先写入 exe 同目录；该目录不可写则写入 `%TEMP%`。
 
-* 64-bit version: Windows 7/8/10/11 64-bit or later
-* 32-bit version: Windows 7 or later
-  * A special _32-bit Windows XP SP2_ build is available, which supports most formats (except for formats added after v1.0.37.1, ex. Animated PNG, JXL, HEIC).  Other features and options are the same as the normal builds.
+## 系统要求
 
-## What's New
+- **Windows 11** —— `RegisterTouchpadCapableWindow` 的系统要求
+- 编译需 Visual Studio 2022（v142 或 v143 工具集）
 
-* See what has changed in the [latest releases](https://github.com/sylikc/jpegview/releases)
-* Or Check the [CHANGELOG.txt](https://github.com/sylikc/jpegview/blob/master/CHANGELOG.txt) to review new features in detail.
+## 构建
 
-# Localization
+向 `master` 推送会自动编译，也可以在 Actions 页面手动触发 **Build x64 Release**。产物是一个可直接运行的便携包，解压即用，无需安装。
 
-By default, the language is auto-detected to match your Windows Locale.  All the text in the menus and user interface should show in your language.  To override the auto-detection, manually set `Language` option in `JPEGView.ini`
+## 原版文档
 
-JPEGView is currently translated/localized to 28 languages:
+格式支持、配置文件、快捷键、命令行参数等完整说明，请见上游：
 
-| INI Option | Language |
-| ---------- | -------- |
-| be | Belarusian |
-| bg | Bulgarian |
-| cs | Czech |
-| de | German |
-| el | Greek, Modern |
-| es-ar | Spanish (Argentina) |
-| es | Spanish |
-| eu | Basque |
-| fi | Finnish |
-| fr | French (Français) |
-| hu | Hungarian |
-| it | Italian |
-| ja | Japanese (日本語) |
-| ko | Korean (한국어) |
-| pl | Polish |
-| pt-br | Portuguese (Brazilian) |
-| pt | Portuguese |
-| ro | Romanian |
-| ru | Russian (Русский) |
-| sk | Slovak |
-| sl | Slovenian (Slovenščina) |
-| sr | Serbian (српски) |
-| sv | Swedish |
-| ta | Tamil |
-| tr | Turkish (Türkçe) |
-| uk | Ukrainian (Українська) |
-| zh-tw | Chinese, Traditional (繁體中文) |
-| zh | Chinese, Simplified (简体中文) |
+- [sylikc/jpegview](https://github.com/sylikc/jpegview)
+- [原版 readme.html](https://htmlpreview.github.io/?https://github.com/sylikc/jpegview/blob/master/src/JPEGView/Config/readme.html)
 
-See the [Localization wiki page](https://github.com/sylikc/jpegview/wiki/Localization#localization-status) for translation status for each language.
+## 许可
 
-# Help / Documentation
-
-The JPEGView documentation is a little out of the date at the moment, but should still give a good summary of the features.
-
-This [readme.html](https://htmlpreview.github.io/?https://github.com/sylikc/jpegview/blob/master/src/JPEGView/Config/readme.html) is part of the JPEGView package.
-
-# Brief History
-
-This GitHub repo continues the legacy (is a "fork") of the excellent project [JPEGView by David Kleiner](https://sourceforge.net/projects/jpegview/).  Unfortunately, starting in 2020, the SourceForge project has essentially been abandoned, with the last update being [2018-02-24 (1.0.37)](https://sourceforge.net/projects/jpegview/files/jpegview/).  It's an excellent lightweight image viewer that I use almost daily!
-
-The starting point for this repo was a direct clone from SourceForge SVN to GitHub Git.  By continuing this way, it retains all previous commits and all original author comments.
-
-I'm hoping with this project, some devs might help me keep the project alive!  It's been awhile, and could use some new features or updates.  Looking forward to the community making suggestions, and devs will help with some do pull requests as some of the image code is quite a learning curve for me to pick it up. -sylikc
-
-## Special Thanks
-
-Special thanks to [qbnu](https://github.com/qbnu) for adding additional codec support!
-* Animated WebP
-* Animated PNG
-* JPEG XL with animation support
-* HEIF/HEIC/AVIF support
-* QOI support
-* ICC Profile support for WebP, JPEG XL, HEIF/HEIC, AVIF
-* LibRaw support (all updated RAW formats, such as CR3)
-* Photoshop PSD support
-
-Thanks to all the _translators_ which keep JPEGView strings up-to-date in different languages!  See [CHANGELOG.txt](https://github.com/sylikc/jpegview/blob/master/CHANGELOG.txt) to find credits for translators at each release!
+GPL-2.0-or-later，与原版一致。
