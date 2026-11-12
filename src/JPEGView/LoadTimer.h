@@ -18,12 +18,21 @@
 
 class CLoadTimer {
 public:
-	explicit CLoadTimer(const char* fileName) : m_active(IsEnabled()), m_count(0) {
+	explicit CLoadTimer(LPCTSTR fileName) : m_active(IsEnabled()), m_count(0) {
 		if (!m_active) return;
 		QueryPerformanceFrequency(&m_freq);
 		QueryPerformanceCounter(&m_start);
 		m_last = m_start;
-		strncpy_s(m_file, fileName != NULL ? fileName : "", _TRUNCATE);
+		m_file[0] = '\0';
+		if (fileName != NULL) {
+			// The project builds as Unicode, but the report is written with the
+			// narrow CRT, so convert once here instead of at every use.
+#ifdef UNICODE
+			WideCharToMultiByte(CP_ACP, 0, fileName, -1, m_file, MAX_PATH, NULL, NULL);
+#else
+			strncpy_s(m_file, fileName, _TRUNCATE);
+#endif
+		}
 	}
 
 	void Mark(const char* tag) {
