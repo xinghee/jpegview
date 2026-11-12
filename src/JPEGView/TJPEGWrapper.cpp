@@ -4,20 +4,19 @@
 #include "libjpeg-turbo\include\turbojpeg.h"
 #include "MaxImageDef.h"
 
-// Very large images (a 389 MP panorama, for instance) are decoded at full size
-// today, which costs over a gigabyte of memory and several seconds - even though
-// the window only ever shows a small part of them. libjpeg-turbo can emit a
-// reduced-size image straight out of the IDCT (1/2 .. 1/8), far cheaper than
-// decoding everything and resampling afterwards.
+// Optional reduced-size decoding for very large JPEGs. libjpeg-turbo can emit a
+// smaller image straight out of the IDCT (1/2 .. 1/8), which saves memory for
+// gigapixel panoramas. The trade-off is permanent: pixels thrown away here can
+// never be recovered, so zooming past the decoded size shows interpolation
+// instead of real detail.
 //
-// The target is twice the virtual screen in each direction, so "fit to window"
-// stays sharp and moderate zooming still has pixels to spend. Images that are
-// already small enough are left completely untouched.
-// Set JPEGVIEW_NO_DOWNSAMPLE=1 to force full-size decoding.
+// Therefore this is OFF by default - full-size decoding is what the original
+// program does, and it is what keeps 1:1 inspection sharp. Set
+// JPEGVIEW_DOWNSAMPLE=1 to opt in when memory matters more than detail.
 static void ApplyDecodeScaling(tjhandle hDecoder, int &width, int &height) {
 	char env[8];
 	env[0] = '\0';
-	if (GetEnvironmentVariableA("JPEGVIEW_NO_DOWNSAMPLE", env, sizeof(env)) > 0 && env[0] == '1') {
+	if (GetEnvironmentVariableA("JPEGVIEW_DOWNSAMPLE", env, sizeof(env)) <= 0 || env[0] != '1') {
 		return;
 	}
 
