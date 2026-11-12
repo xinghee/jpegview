@@ -1,6 +1,7 @@
 #include "stdafx.h"
 
 #include "PNGWrapper.h"
+#include "LoadTimer.h"
 
 #ifndef WINXP
 #include "png.h"
@@ -66,6 +67,8 @@ struct PngReader::png_cache {
 	unsigned int channels;
 	unsigned int frame_index;
 	png_uint_32 frame_count;
+	bool has_alpha;      // source has an alpha channel or a tRNS chunk
+	bool still;          // single frame: decodes straight into p_image
 	void* buffer;
 	size_t buffer_size;
 	size_t buffer_offset;
@@ -127,6 +130,16 @@ void* PngReader::ReadNextFrame(void** exif_chunk, png_uint_32* exif_size)
 			cache.dop = PNG_DISPOSE_OP_BACKGROUND;
 	}
 #endif
+	if (cache.still) {
+		// Single frame: decode into the contiguous image buffer and transfer
+		// ownership to the caller. rows_image[] already points into p_image
+		// with rowbytes == width * 4, exactly the layout the caller expects.
+		png_read_image(cache.png_ptr, cache.rows_image);
+		void* still_pixels = cache.p_image;
+		cache.p_image = NULL;   // DeleteCache() must not free it any more
+		return still_pixels;
+	}
+
 	png_read_image(cache.png_ptr, cache.rows_frame);
 
 #ifdef PNG_APNG_SUPPORTED
@@ -199,6 +212,20 @@ bool PngReader::BeginReading(void* buffer, size_t sizebytes, bool& outOfMemory)
 		};
 		png_set_read_fn(png_ptr, (char*)buffer, read_data_fn);
 		png_read_info(png_ptr, info_ptr);
+		// The colour type must be read before png_read_update_info(), which
+		// reports the transformed layout instead of the source one.
+		png_byte src_color_type = png_get_color_type(png_ptr, info_ptr);
+		bool src_has_alpha = ((src_color_type & PNG_COLOR_MASK_ALPHA) != 0) ||
+			(png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS) != 0);
+		png_uint_32 total_frames = 1;
+#ifdef PNG_APNG_SUPPORTED
+		{
+			png_uint_32 plays_probe = 0;
+			if (png_get_valid(png_ptr, info_ptr, PNG_INFO_acTL))
+				png_get_acTL(png_ptr, info_ptr, &total_frames, &plays_probe);
+		}
+#endif
+		bool bStill = (total_frames <= 1);
 		png_set_expand(png_ptr);
 		png_set_strip_16(png_ptr);
 		png_set_gray_to_rgb(png_ptr);
@@ -226,13 +253,17 @@ bool PngReader::BeginReading(void* buffer, size_t sizebytes, bool& outOfMemory)
 		rowbytes = (unsigned int)png_get_rowbytes(png_ptr, info_ptr);
 		size = height * rowbytes;
 		p_image = (unsigned char*)malloc(size);
-		p_frame = (unsigned char*)malloc(size);
-		p_temp = (unsigned char*)malloc(size);
+		// A still image needs neither a second frame buffer, nor the scratch
+		// buffer, nor a second row table. Skipping them also lets ReadNextFrame
+		// hand p_image straight to the caller, which removes two full-size
+		// copies (2.8 GB of memcpy for 355 MP) and one 1.4 GB allocation.
+		p_frame = bStill ? NULL : (unsigned char*)malloc(size);
+		p_temp = bStill ? NULL : (unsigned char*)malloc(size);
 		rows_image = (png_bytepp)malloc(height * sizeof(png_bytep));
-		rows_frame = (png_bytepp)malloc(height * sizeof(png_bytep));
-		if (p_image && p_frame && p_temp && rows_image && rows_frame)
+		rows_frame = bStill ? NULL : (png_bytepp)malloc(height * sizeof(png_bytep));
+		if (p_image && rows_image && (bStill || (p_frame && p_temp && rows_frame)))
 		{
-			png_uint_32     frames = 1;
+			png_uint_32     frames = total_frames;
 			png_uint_32     x0 = 0;
 			png_uint_32     y0 = 0;
 			png_uint_32     w0 = width;
@@ -250,8 +281,9 @@ bool PngReader::BeginReading(void* buffer, size_t sizebytes, bool& outOfMemory)
 			for (j = 0; j < height; j++)
 				rows_image[j] = p_image + j * rowbytes;
 
-			for (j = 0; j < height; j++)
-				rows_frame[j] = p_frame + j * rowbytes;
+			if (!bStill)
+				for (j = 0; j < height; j++)
+					rows_frame[j] = p_frame + j * rowbytes;
 
 #ifdef PNG_APNG_SUPPORTED
 			cache.bop = bop;
@@ -262,6 +294,8 @@ bool PngReader::BeginReading(void* buffer, size_t sizebytes, bool& outOfMemory)
 			cache.first = first;
 #endif
 			cache.channels = channels;
+			cache.has_alpha = src_has_alpha;
+			cache.still = bStill;
 			cache.h0 = h0;
 			cache.height = height;
 			// cache ptrs here, only if valid
@@ -293,6 +327,7 @@ bool PngReader::BeginReading(void* buffer, size_t sizebytes, bool& outOfMemory)
 void* PngReader::ReadImage(int& width,
 	int& height,
 	int& nchannels,
+	bool& has_alpha,
 	bool& has_animation,
 	int& frame_count,
 	int& frame_time,
@@ -302,6 +337,12 @@ void* PngReader::ReadImage(int& width,
 	size_t sizebytes)
 {
 	exif_chunk = NULL;
+	LARGE_INTEGER qpf, qpNow, qpStage;
+	bool bTime = LoadLogEnabled();
+	if (bTime) {
+		QueryPerformanceFrequency(&qpf);
+		QueryPerformanceCounter(&qpStage);
+	}
 	if (!cache.buffer) {
 		if (sizebytes < 8)
 			return NULL;
@@ -322,6 +363,12 @@ void* PngReader::ReadImage(int& width,
 
 	}
 
+	if (bTime) {
+		QueryPerformanceCounter(&qpNow);
+		LoadLogNote("  png.header   %8.1f ms", (double)(qpNow.QuadPart - qpStage.QuadPart) * 1000.0 / (double)qpf.QuadPart);
+		QueryPerformanceCounter(&qpStage);
+	}
+
 	void* exif = NULL;
 	unsigned int exif_size = 0;
 	bool read_two = cache.frame_index < cache.first;
@@ -329,9 +376,15 @@ void* PngReader::ReadImage(int& width,
 	if (pixels && read_two)
 		pixels = ReadNextFrame(&exif, &exif_size);
 	
+	if (bTime) {
+		QueryPerformanceCounter(&qpNow);
+		LoadLogNote("  png.decode   %8.1f ms", (double)(qpNow.QuadPart - qpStage.QuadPart) * 1000.0 / (double)qpf.QuadPart);
+	}
+
 	width = cache.width;
 	height = cache.height;
 	nchannels = cache.channels;
+	has_alpha = cache.has_alpha;
 	has_animation = (cache.frame_count > 1);
 	frame_count = cache.frame_count;
 
