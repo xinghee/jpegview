@@ -10,6 +10,7 @@
 #include "EXIFReader.h"
 #include "RawMetadata.h"
 #include "MaxImageDef.h"
+#include "LoadTimer.h"
 #include "libjpeg-turbo\include\turbojpeg.h"
 #include <math.h>
 #include <assert.h>
@@ -992,6 +993,7 @@ void* CJPEGImage::GetDIBInternal(CSize fullTargetSize, CSize clippingSize, CPoin
 		if (!m_bFirstReprocessing) {
 			ConvertSrcTo4Channels();
 		}
+		CLoadTrace::Inst().Mark("4ch");
 
 		bParametersChanged = true;
 
@@ -1023,6 +1025,7 @@ void* CJPEGImage::GetDIBInternal(CSize fullTargetSize, CSize clippingSize, CPoin
 			}
 		}
 
+		CLoadTrace::Inst().Mark("resample");
 		// if ResampleWithPan() has preserved this DIB, we can reuse it
 		if (m_pDIBPixelsLUTProcessed == NULL) {
 			pDIBUnsharpMasked = ApplyUnsharpMask(pUnsharpMaskParams, false);
@@ -1032,6 +1035,7 @@ void* CJPEGImage::GetDIBInternal(CSize fullTargetSize, CSize clippingSize, CPoin
 		} else {
 			pDIB = m_pDIBPixelsLUTProcessed;
 		}
+		CLoadTrace::Inst().Mark("lut");
 	}
 
 	double dLastOpTickCount = Helpers::GetExactTickCount() - dStartTickCount; 
@@ -1054,6 +1058,7 @@ void* CJPEGImage::GetDIBInternal(CSize fullTargetSize, CSize clippingSize, CPoin
 	}
 	m_eProcFlags = eProcFlags;
 
+	CLoadTrace::Inst().End();
 	m_pLastDIB = pDIB;
 	if (m_pDIBPixelsLUTProcessed != pDIBUnsharpMasked) {
 		delete[] pDIBUnsharpMasked;
