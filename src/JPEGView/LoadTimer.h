@@ -31,6 +31,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 
 // Opens the shared log for appending; returns NULL when there is nowhere to
 // write. Kept as a free function so both reporters use identical path rules.
@@ -71,6 +72,20 @@ static void LoadLogNarrow(LPCTSTR src, char* dst, int cch) {
 #else
 	strncpy_s(dst, cch, src, _TRUNCATE);
 #endif
+}
+
+// One-off line in the shared log, for stages that live in a different module
+// and cannot reach the timers above. Inert unless logging is enabled.
+static void LoadLogNote(const char* fmt, ...) {
+	if (!LoadLogEnabled()) return;
+	FILE* f = LoadLogOpen();
+	if (f == NULL) return;
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(f, fmt, ap);
+	va_end(ap);
+	fputc('\n', f);
+	fclose(f);
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +171,9 @@ private:
 	}
 
 	void WriteBlockLocked() {
+		// A repaint of an unrelated image can end a trace that never got a mark;
+		// writing an empty block only adds noise.
+		if (m_count == 0) return;
 		FILE* f = LoadLogOpen();
 		if (f == NULL) return;
 
