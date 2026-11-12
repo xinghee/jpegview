@@ -35,14 +35,16 @@ static void ApplyDecodeScaling(tjhandle hDecoder, int &width, int &height) {
 	if (factors == NULL || count <= 0) return;
 
 	// Pick the biggest reduction that still covers the target rectangle.
+	// Areas are compared as double: MAX_IMAGE_PIXELS allows up to 65535x65535,
+	// which overflows a 32-bit long on Windows.
 	tjscalingfactor chosen = TJUNSCALED;
-	long bestArea = (long)width * (long)height;
+	double bestArea = (double)width * (double)height;
 	bool found = false;
 	for (int i = 0; i < count; i++) {
 		int w = TJSCALED(width, factors[i]);
 		int h = TJSCALED(height, factors[i]);
 		if (w >= targetW && h >= targetH) {
-			long area = (long)w * (long)h;
+			double area = (double)w * (double)h;
 			if (!found || area < bestArea) {
 				chosen = factors[i];
 				bestArea = area;
@@ -84,7 +86,9 @@ void * TurboJpeg::ReadImage(int &width,
 		height = tj3Get(hDecoder, TJPARAM_JPEGHEIGHT);
 		chromoSubsampling = (TJSAMP)tj3Get(hDecoder, TJPARAM_SUBSAMP);
 		ApplyDecodeScaling(hDecoder, width, height);
-		if (abs((double)width * height) > MAX_IMAGE_PIXELS) {
+		// Compared as double: abs() would truncate to int and can go negative
+		// for images allowed by MAX_IMAGE_PIXELS (up to 65535x65535).
+		if ((double)width * (double)height > (double)MAX_IMAGE_PIXELS) {
 			outOfMemory = true;
 		} else if (width <= MAX_IMAGE_DIMENSION && height <= MAX_IMAGE_DIMENSION && chromoSubsampling != TJSAMP_UNKNOWN) {
 			pPixelData = new(std::nothrow) unsigned char[TJPAD(width * 3) * height];
