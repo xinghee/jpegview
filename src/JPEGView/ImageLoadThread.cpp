@@ -4,6 +4,7 @@
 #include <gdiplus.h>
 #include "JPEGImage.h"
 #include "MessageDef.h"
+#include "LoadTimer.h"
 #include "Helpers.h"
 #include "SettingsProvider.h"
 #include "ReaderBMP.h"
@@ -472,6 +473,7 @@ void CImageLoadThread::DeleteCachedAvifDecoder() {
 }
 
 void CImageLoadThread::ProcessReadJPEGRequest(CRequest * request) {
+	CLoadTimer timer(request->FileName);
 	HANDLE hFile = ::CreateFile(request->FileName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
 	if (hFile == INVALID_HANDLE_VALUE) {
 		return;
@@ -497,6 +499,7 @@ void CImageLoadThread::ProcessReadJPEGRequest(CRequest * request) {
 		}
 		unsigned int nNumBytesRead;
 		if (::ReadFile(hFile, pBuffer, nFileSize, (LPDWORD) &nNumBytesRead, NULL) && nNumBytesRead == nFileSize) {
+			timer.Mark("read");
 			bool bUseGDIPlus = CSettingsProvider::This().ForceGDIPlus() || CSettingsProvider::This().UseEmbeddedColorProfiles();
 			if (bUseGDIPlus) {
 				IStream* pStream = NULL;
@@ -522,6 +525,7 @@ void CImageLoadThread::ProcessReadJPEGRequest(CRequest * request) {
 				// int nTicks = ::GetTickCount();
 
 				void* pPixelData = TurboJpeg::ReadImage(nWidth, nHeight, nBPP, eChromoSubSampling, bOutOfMemory, pBuffer, nFileSize);
+				timer.Mark("decode");
 				
 				/*
 				TCHAR buffer[20];
@@ -536,6 +540,7 @@ void CImageLoadThread::ProcessReadJPEGRequest(CRequest * request) {
 						Helpers::CalculateJPEGFileHash(pBuffer, nFileSize), IF_JPEG, false, 0, 1, 0);
 					request->Image->SetJPEGComment(Helpers::GetJPEGComment(pBuffer, nFileSize));
 					request->Image->SetJPEGChromoSampling(eChromoSubSampling);
+					timer.Mark("construct");
 				} else if (bOutOfMemory) {
 					request->OutOfMemory = true;
 				} else {
@@ -650,6 +655,7 @@ void CImageLoadThread::ProcessReadWEBPRequest(CRequest * request) {
 
 #ifndef WINXP
 void CImageLoadThread::ProcessReadPNGRequest(CRequest* request) {
+	CLoadTimer timer(request->FileName);
 	bool bUseCachedDecoder = false;
 	const wchar_t* sFileName;
 	sFileName = (const wchar_t*)request->FileName;
@@ -692,6 +698,7 @@ void CImageLoadThread::ProcessReadPNGRequest(CRequest* request) {
 			nFileSize = 0; // to avoid compiler warnings, not used
 		}
 		if (bUseCachedDecoder || (::ReadFile(hFile, pBuffer, nFileSize, (LPDWORD)&nNumBytesRead, NULL) && nNumBytesRead == nFileSize)) {
+			timer.Mark("read");
 			int nWidth, nHeight, nBPP, nFrameCount, nFrameTimeMs;
 			bool bHasAnimation;
 			uint8* pPixelData = NULL;
@@ -704,6 +711,7 @@ void CImageLoadThread::ProcessReadPNGRequest(CRequest* request) {
 				pPixelData = (uint8*)PngReader::ReadImage(nWidth, nHeight, nBPP, bHasAnimation, nFrameCount, nFrameTimeMs, pEXIFData, request->OutOfMemory, pBuffer, nFileSize);
 #endif
 
+			timer.Mark("decode");
 			if (pPixelData != NULL) {
 				if (bHasAnimation)
 					m_sLastPngFileName = sFileName;
@@ -711,8 +719,10 @@ void CImageLoadThread::ProcessReadPNGRequest(CRequest* request) {
 				uint32* pImage32 = (uint32*)pPixelData;
 				for (int i = 0; i < nWidth * nHeight; i++)
 					*pImage32++ = Helpers::AlphaBlendBackground(*pImage32, CSettingsProvider::This().ColorTransparency());
+				timer.Mark("alpha");
 
 				request->Image = new CJPEGImage(nWidth, nHeight, pPixelData, pEXIFData, 4, 0, IF_PNG, bHasAnimation, request->FrameIndex, nFrameCount, nFrameTimeMs);
+				timer.Mark("construct");
 			} else {
 				DeleteCachedPngDecoder();
 				
