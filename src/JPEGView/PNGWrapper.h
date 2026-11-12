@@ -9,6 +9,7 @@ public:
 	static void* ReadImage(int& width,   // width of the image loaded.
 		int& height,  // height of the image loaded.
 		int& bpp,     // BYTES (not bits) PER PIXEL.
+		bool& has_alpha, // false when the source has no alpha channel and no tRNS
 		bool& has_animation,     // if the image is animated
 		int& frame_count, // number of frames
 		int& frame_time, // frame duration in milliseconds
