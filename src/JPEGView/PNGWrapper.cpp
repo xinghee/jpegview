@@ -172,6 +172,17 @@ void* PngReader::ReadNextFrame(void** exif_chunk, png_uint_32* exif_size)
 	return pixels;
 }
 
+// Debug switch: keep the historical decode path so the two can be compared
+// pixel for pixel on the same build.
+static bool ForceSlowPath()
+{
+	char env[8];
+	env[0] = '\0';
+	if (GetEnvironmentVariableA("JPEGVIEW_PNG_SLOW", env, sizeof(env)) <= 0)
+		return false;
+	return env[0] == '1';
+}
+
 bool PngReader::BeginReading(void* buffer, size_t sizebytes, bool& outOfMemory)
 {
 	unsigned int    width, height, channels, rowbytes, size, j;
@@ -218,14 +229,21 @@ bool PngReader::BeginReading(void* buffer, size_t sizebytes, bool& outOfMemory)
 		bool src_has_alpha = ((src_color_type & PNG_COLOR_MASK_ALPHA) != 0) ||
 			(png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS) != 0);
 		png_uint_32 total_frames = 1;
+		bool has_actl = false;
 #ifdef PNG_APNG_SUPPORTED
 		{
 			png_uint_32 plays_probe = 0;
-			if (png_get_valid(png_ptr, info_ptr, PNG_INFO_acTL))
+			if (png_get_valid(png_ptr, info_ptr, PNG_INFO_acTL)) {
+				has_actl = true;
 				png_get_acTL(png_ptr, info_ptr, &total_frames, &plays_probe);
+			}
 		}
 #endif
-		bool bStill = (total_frames <= 1);
+		// Fast path only for plain still images. Anything carrying an acTL chunk
+		// keeps the original code path: even a one-frame APNG can have frame
+		// offsets and blend operations that the fast path would skip.
+		// JPEGVIEW_PNG_SLOW=1 forces the old path so both can be compared.
+		bool bStill = (total_frames <= 1) && !has_actl && !ForceSlowPath();
 		png_set_expand(png_ptr);
 		png_set_strip_16(png_ptr);
 		png_set_gray_to_rgb(png_ptr);
