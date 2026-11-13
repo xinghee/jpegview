@@ -74,6 +74,24 @@ static void LoadLogNarrow(LPCTSTR src, char* dst, int cch) {
 #endif
 }
 
+// Debug switch for pixel-identity checks. Kept separate from the timing switch
+// because hashing 1.4 GB takes about a second and would pollute the timings.
+static bool LoadHashEnabled() {
+	char buf[8];
+	buf[0] = '\0';
+	return GetEnvironmentVariableA("JPEGVIEW_PNG_HASH", buf, (DWORD)sizeof(buf)) > 0 && buf[0] == '1';
+}
+
+static unsigned long long Fnv1a64(const void* data, size_t size) {
+	const unsigned char* p = (const unsigned char*)data;
+	unsigned long long h = 1469598103934665603ULL;
+	for (size_t i = 0; i < size; i++) {
+		h ^= (unsigned long long)p[i];
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
 // One-off line in the shared log, for stages that live in a different module
 // and cannot reach the timers above. Inert unless logging is enabled.
 static void LoadLogNote(const char* fmt, ...) {
