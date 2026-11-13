@@ -714,6 +714,11 @@ void CImageLoadThread::ProcessReadPNGRequest(CRequest* request) {
 
 			timer.Mark("decode");
 			if (pPixelData != NULL) {
+				if (LoadHashEnabled()) {
+					LoadLogNote("  png.hash     %016llx  %dx%d ch=%d alpha=%d",
+						Fnv1a64(pPixelData, (size_t)nWidth * (size_t)nHeight * 4),
+						nWidth, nHeight, nBPP, (int)bHasAlpha);
+				}
 				if (bHasAnimation)
 					m_sLastPngFileName = sFileName;
 				// Multiply alpha value into each AABBGGRR pixel.
